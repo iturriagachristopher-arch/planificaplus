@@ -777,7 +777,7 @@ def project_context() -> str:
 
 with T[5]:
     try:
-        prov = ia.provider(st.secrets)
+        prov = ia.providers(st.secrets) or None
     except Exception:
         prov = None
     st.caption("El asistente responde solo sobre este proyecto y el uso de PlanificA+. Revisa siempre sus respuestas antes de enviarlas.")

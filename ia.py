@@ -3,7 +3,7 @@
 Proveedor según los Secrets de Streamlit:
   - GEMINI_API_KEY    → Google Gemini (modelo en GEMINI_MODEL, por defecto gemini-2.5-flash)
   - ANTHROPIC_API_KEY → Claude (modelo en CLAUDE_MODEL, por defecto claude-haiku-5-5)
-Si existen ambas, AI_PROVIDER = "gemini" | "claude" decide.
+Si existen ambas, AI_PROVIDER = "gemini" | "claude" decide cuál va primero; la otra queda de respaldo.
 """
 from __future__ import annotations
 
@@ -48,7 +48,38 @@ def provider(secrets) -> tuple[str, str, str] | None:
     return None
 
 
-def ask(prov: tuple[str, str, str], context: str, history: list[dict], question: str) -> str:
+def providers(secrets) -> list[tuple[str, str, str]]:
+    """Proveedor principal + el otro como respaldo (si tiene clave). Lista vacía si no hay ninguno."""
+    first = provider(secrets)
+    if first is None:
+        return []
+    def get(k, d=""):
+        try:
+            return str(secrets[k]).strip()
+        except Exception:
+            return d
+    out = [first]
+    if first[0] == "claude" and get("GEMINI_API_KEY"):
+        out.append(("gemini", get("GEMINI_API_KEY"), get("GEMINI_MODEL", "gemini-3.8-flash")))
+    if first[0] == "gemini" and get("ANTHROPIC_API_KEY"):
+        out.append(("claude", get("ANTHROPIC_API_KEY"), get("CLAUDE_MODEL", "claude-haiku-5-5")))
+    return out
+
+
+def ask(prov, context: str, history: list[dict], question: str) -> str:
+    """prov: un proveedor o la lista de providers(); si el primero falla, se usa el respaldo."""
+    if isinstance(prov, list):
+        err = None
+        for p in prov:
+            try:
+                return _ask_one(p, context, history, question)
+            except Exception as e:   # probar el respaldo
+                err = e
+        raise err if isinstance(err, RuntimeError) else RuntimeError("No se pudo conectar con el asistente. Intenta de nuevo.")
+    return _ask_one(prov, context, history, question)
+
+
+def _ask_one(prov: tuple[str, str, str], context: str, history: list[dict], question: str) -> str:
     """history: [{'role': 'user'|'assistant', 'content': str}] de turnos anteriores (se envían los últimos 6)."""
     name, key, model = prov
     system = SYSTEM + "\n\nDATOS DEL PROYECTO (solo lectura):\n" + context[:MAX_CTX]
@@ -89,7 +120,7 @@ def ask(prov: tuple[str, str, str], context: str, history: list[dict], question:
     r = requests.post(
         "https://api.anthropic.com/v1/messages",
         headers={"x-api-key": key, "anthropic-version": "2023-06-01", "content-type": "application/json"},
-        json={"model": model, "max_tokens": 1500, "temperature": 0.2, "system": system, "messages": turns},
+        json={"model": model, "max_tokens": 4000, "temperature": 0.2, "system": system, "messages": turns},
         timeout=60)
     if r.status_code == 429:
         raise RuntimeError("Se alcanzó el límite de uso de la API de Claude. Intenta en unos minutos.")

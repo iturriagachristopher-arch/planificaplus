@@ -23,6 +23,12 @@ class User(Base):
     pw_hash = Column(String(100), nullable=False)
     active = Column(Integer, default=1)
     must_change = Column(Integer, default=0)  # 1 = clave temporal: debe cambiarla al entrar
+    email = Column(String(120), default="")
+    created_at = Column(DateTime, default=datetime.utcnow)
+    last_login = Column(DateTime)               # None = nunca ha entrado
+    failed = Column(Integer, default=0)         # intentos fallidos seguidos
+    locked_until = Column(DateTime)             # bloqueo temporal por intentos fallidos
+    deact_reason = Column(String(80), default="")
 
 
 class PasswordRequest(Base):
@@ -243,9 +249,31 @@ def _migrate():
     """Agrega columnas nuevas a tablas ya existentes (create_all no modifica tablas)."""
     from sqlalchemy import inspect, text
     cols = {c["name"] for c in inspect(ENGINE).get_columns("users")}
-    if "must_change" not in cols:
-        with ENGINE.begin() as con:
-            con.execute(text("ALTER TABLE users ADD COLUMN must_change INTEGER DEFAULT 0"))
+    ts = "TIMESTAMP" if ENGINE.dialect.name == "postgresql" else "DATETIME"
+    add = {"must_change": "INTEGER DEFAULT 0", "email": "VARCHAR(120) DEFAULT ''", "created_at": ts,
+           "last_login": ts, "failed": "INTEGER DEFAULT 0", "locked_until": ts, "deact_reason": "VARCHAR(80) DEFAULT ''"}
+    with ENGINE.begin() as con:
+        for name, typ in add.items():
+            if name not in cols:
+                con.execute(text(f"ALTER TABLE users ADD COLUMN {name} {typ}"))
+        # Usuarios anteriores a esta versión: se cuentan como creados ahora (no se desactivan de golpe).
+        con.execute(text("UPDATE users SET created_at = :n WHERE created_at IS NULL"), {"n": datetime.utcnow()})
+
+
+FIRST_LOGIN_DAYS = 5      # días para el primer ingreso antes de desactivar la cuenta
+MAX_FAILED, LOCK_MIN = 5, 15  # intentos fallidos permitidos y minutos de bloqueo
+
+
+def sweep_inactive() -> int:
+    """Desactiva cuentas que nunca entraron dentro de FIRST_LOGIN_DAYS. Devuelve cuántas desactivó."""
+    from datetime import timedelta
+    lim = datetime.utcnow() - timedelta(days=FIRST_LOGIN_DAYS)
+    with Session() as s:
+        us = s.scalars(select(User).where(User.active == 1, User.must_change == 1, User.last_login.is_(None), User.created_at < lim)).all()
+        for u in us:
+            u.active, u.deact_reason = 0, f"Sin primer ingreso en {FIRST_LOGIN_DAYS} días"
+        s.commit()
+        return len(us)
 
 
 def temp_password() -> str:

@@ -9,7 +9,9 @@ Aplicación web para controlar el programa de una obra de subestación eléctric
 - **KPI**: desviación del término, % de etapas cerradas en plazo, desviación promedio al cierre, días por causa, evolución de la fecha de término y cambios por área.
 - **Exportación a Excel** del programa, los cambios y el registro de avance.
 - **Asistente IA** (Gemini o Claude) que responde solo sobre el proyecto: resumen, etapas en riesgo, reporte semanal y extracción de hitos desde las bases.
-- **Seguridad de claves**: las claves que asigna el administrador son temporales (el usuario crea la suya al entrar), cada usuario puede cambiar su clave y la recuperación de contraseña pasa por el dueño de la app (`APP_OWNER`).
+- **Seguridad de cuentas**: claves cifradas (bcrypt) y temporales al crear (el usuario crea la suya al entrar); bloqueo de 15 min tras 5 intentos fallidos; la sesión se cierra tras 30 min sin actividad; una cuenta nueva que no entra en 5 días se desactiva sola; la recuperación de contraseña pasa por el dueño de la app (`APP_OWNER`).
+- **Panel del dueño**: estado de cada cuenta, último ingreso, días sin entrar (🟡 desde 15), botones para desactivar, reactivar (con nueva clave temporal) y desbloquear.
+- **Correo de bienvenida** (opcional, vía SMTP/Gmail): al crear o reactivar un usuario se le envía su usuario y clave temporal.
 
 Proyecto A+S · AIEP Santiago Norte · Ingeniería Industrial · INU603 — Leslie Vera, Christopher Iturriaga, Andrés Molina.
 
@@ -71,6 +73,9 @@ Streamlit Cloud **borra los archivos locales** cada vez que la app se reinicia, 
    DEMO_PASSWORD = "una-clave-segura"
    APP_OWNER = "christopher"          # dueño: resuelve recuperaciones de clave
    GEMINI_API_KEY = "tu-api-key"       # opcional: activa el Asistente IA (aistudio.google.com)
+   INITIAL_PASSWORD = "clave-inicial"  # opcional: clave temporal por defecto al crear usuarios
+   SMTP_USER = "cuenta@gmail.com"      # opcional: envío de correos (Gmail con contraseña de aplicación)
+   SMTP_PASSWORD = "xxxx xxxx xxxx xxxx"
    ```
 
 4. **Deploy**. En 2–3 minutos tendrás una URL tipo `https://planificaplus.streamlit.app` para compartir.
@@ -87,6 +92,8 @@ Streamlit Cloud **borra los archivos locales** cada vez que la app se reinicia, 
 | `app.py` | Interfaz (Streamlit): login, Gantt, avance, etapas, historial, KPI y administración |
 | `logic.py` | Cálculos: programación por dependencias, avance plan, semáforo, diferencias entre versiones |
 | `db.py` | Base de datos (SQLAlchemy), usuarios con contraseña cifrada (bcrypt) y proyecto de ejemplo |
+| `ia.py` | Asistente IA (Gemini / Claude) limitado al proyecto |
+| `mailer.py` | Envío de correos de acceso (SMTP) |
 | `.streamlit/config.toml` | Colores de la app |
 | `.streamlit/secrets.toml.example` | Ejemplo de configuración de secretos |
 

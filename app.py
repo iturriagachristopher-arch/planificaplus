@@ -11,6 +11,7 @@ from sqlalchemy import select
 
 import db
 import ia
+import mailer
 import logic
 from logic import AREAS, ROLES, CAUSES, TOL_OK, TOL_HIGH
 
@@ -31,11 +32,18 @@ except Exception:
 try:
     INITIAL_PW = str(st.secrets["INITIAL_PASSWORD"])
 except Exception:
-    INITIAL_PW = "Inicio1234"  # clave inicial estándar: el usuario debe cambiarla al entrar
+    INITIAL_PW = None  # sin INITIAL_PASSWORD en Secrets hay que escribir la clave inicial a mano
 try:
     OWNER = str(st.secrets["APP_OWNER"]).strip().lower()
 except Exception:
     OWNER = "christopher"  # dueño de la app: el único que resuelve recuperaciones de clave
+
+
+try:
+    APP_URL = str(st.secrets["APP_URL"]).strip()
+except Exception:
+    APP_URL = "https://planificaplus.streamlit.app"
+SESSION_MIN = 30  # minutos sin actividad antes de cerrar la sesión
 
 
 @st.cache_resource
@@ -57,13 +65,33 @@ def login_view():
             u = st.text_input("Usuario")
             pw = st.text_input("Contraseña", type="password")
             ok = st.form_submit_button("Ingresar", type="primary", width="stretch")
+        if st.session_state.pop("expired", False):
+            st.info(f"Tu sesión se cerró tras {SESSION_MIN} minutos sin actividad. Vuelve a ingresar.")
         if ok:
+            db.sweep_inactive()
+            now = datetime.utcnow()
             with db.Session() as s:
-                user = s.scalar(select(db.User).where(db.User.username == u.strip().lower(), db.User.active == 1))
-            if user and db.check_pw(pw, user.pw_hash):
-                st.session_state.uid = user.id
-                st.rerun()
-            st.error("Usuario o contraseña incorrectos.")
+                user = s.scalar(select(db.User).where(db.User.username == u.strip().lower()))
+                if user and user.locked_until and user.locked_until > now:
+                    mins = int((user.locked_until - now).total_seconds() // 60) + 1
+                    st.error(f"Cuenta bloqueada por intentos fallidos. Intenta de nuevo en {mins} min o pide ayuda al administrador.")
+                elif user and db.check_pw(pw, user.pw_hash):
+                    if not user.active:
+                        st.error("Tu cuenta está desactivada" + (f" ({user.deact_reason.lower()})" if user.deact_reason else "")
+                                 + ". Contacta al administrador para reactivarla.")
+                    else:
+                        user.failed, user.locked_until, user.last_login = 0, None, now
+                        s.commit()
+                        st.session_state.uid, st.session_state.seen = user.id, now
+                        st.rerun()
+                else:
+                    if user:
+                        user.failed = (user.failed or 0) + 1
+                        if user.failed >= db.MAX_FAILED:
+                            user.failed, user.locked_until = 0, now + timedelta(minutes=db.LOCK_MIN)
+                        s.commit()
+                    # Mismo mensaje exista o no el usuario.
+                    st.error(f"Usuario o contraseña incorrectos. Tras {db.MAX_FAILED} intentos fallidos la cuenta se bloquea {db.LOCK_MIN} minutos.")
         with st.expander("¿Olvidaste tu contraseña?"):
             st.caption("Tu solicitud llega al administrador de la app. Él te entregará una clave temporal "
                        "por un canal directo (WhatsApp o correo) y al entrar deberás crear una nueva.")
@@ -124,7 +152,7 @@ def pw_form(key: str, need_current: bool, user) -> None:
             st.error("Las contraseñas nuevas no coinciden.")
         elif n1 == cur:
             st.error("La nueva contraseña debe ser distinta de la actual.")
-        elif n1 == INITIAL_PW:
+        elif INITIAL_PW and n1 == INITIAL_PW:
             st.error("No puedes usar la clave inicial estándar como tu contraseña.")
         else:
             with db.Session() as s:
@@ -138,6 +166,13 @@ def pw_form(key: str, need_current: bool, user) -> None:
 if "uid" not in st.session_state:
     login_view()
     st.stop()
+
+_now = datetime.utcnow()
+if _now - st.session_state.get("seen", _now) > timedelta(minutes=SESSION_MIN):
+    st.session_state.clear()
+    st.session_state.expired = True
+    st.rerun()
+st.session_state.seen = _now
 
 with db.Session() as s:
     USER = s.get(db.User, st.session_state.uid)
@@ -682,13 +717,82 @@ with T[5]:
 if IS_ADMIN:
     with T[6]:
         st.subheader("Usuarios")
+        db.sweep_inactive()
+        if "user_msg" in st.session_state:
+            st.info(st.session_state.pop("user_msg"))
         with db.Session() as s:
             users = s.scalars(select(db.User).order_by(db.User.id)).all()
-        st.dataframe(pd.DataFrame([{"Usuario": u.username, "Nombre": u.name, "Perfil": ROLES[u.role][0] + (" · dueño" if u.username == OWNER else ""),
-                                    "Activo": "Sí" if u.active else "No",
-                                    "Clave": "Temporal (debe cambiarla)" if u.must_change else "Propia"} for u in users]),
-                     hide_index=True, width="stretch")
-        st.caption("Las claves que asigna el administrador son temporales: el usuario debe crear una propia al entrar.")
+        from zoneinfo import ZoneInfo
+        _cl = lambda d: d.replace(tzinfo=ZoneInfo("UTC")).astimezone(ZoneInfo("America/Santiago")) if d else None
+        _nowu = datetime.utcnow()
+
+        def u_row(u):
+            ref = u.last_login or u.created_at
+            days = (_nowu - ref).days if ref else None
+            if not u.active:
+                state = "🔴 Desactivada" + (f" · {u.deact_reason}" if u.deact_reason else "")
+            elif u.locked_until and u.locked_until > _nowu:
+                state = "🔒 Bloqueada (intentos)"
+            elif u.last_login is None and u.must_change:
+                left = db.FIRST_LOGIN_DAYS - days if days is not None else db.FIRST_LOGIN_DAYS
+                state = f"⏳ Sin primer ingreso · quedan {max(left, 0)} d"
+            elif days is not None and days >= 15:
+                state = f"🟡 {days} días sin entrar"
+            else:
+                state = "🟢 Activa"
+            return {"Usuario": u.username, "Nombre": u.name, "Perfil": ROLES[u.role][0] + (" · dueño" if u.username == OWNER else ""),
+                    "Estado": state, "Correo": u.email or "—",
+                    "Clave": "Temporal" if u.must_change else "Propia",
+                    "Último ingreso": _cl(u.last_login), "Creado": _cl(u.created_at),
+                    "Días sin entrar": None if u.last_login is None else (_nowu - u.last_login).days}
+        st.dataframe(pd.DataFrame([u_row(u) for u in users]), hide_index=True, width="stretch",
+                     column_config={"Último ingreso": st.column_config.DatetimeColumn(format="DD-MM-YY HH:mm"),
+                                    "Creado": st.column_config.DatetimeColumn(format="DD-MM-YY HH:mm")})
+        st.caption(f"Las claves que asigna el administrador son temporales. Una cuenta nueva que no entra en {db.FIRST_LOGIN_DAYS} días "
+                   f"se desactiva sola · 🟡 = 15 días o más sin entrar · {db.MAX_FAILED} intentos fallidos bloquean la cuenta {db.LOCK_MIN} min.")
+
+        if IS_OWNER:
+            st.markdown("**🧭 Panel del dueño · activar, desactivar y desbloquear cuentas**")
+            others = [u for u in users if u.username != OWNER]
+            if others:
+                p1, p2, p3, p4 = st.columns([2.2, 1, 1.5, 1])
+                tgt_name = p1.selectbox("Cuenta", [u.username for u in others], key="own_tgt",
+                                        format_func=lambda n: f"{n} · {u_row(next(x for x in others if x.username == n))['Estado']}")
+                tgt = next(u for u in others if u.username == tgt_name)
+                p2.write("")
+                p3.write("")
+                p4.write("")
+                if tgt.active and p2.button("Desactivar", key="own_off"):
+                    with db.Session() as s:
+                        u = s.get(db.User, tgt.id)
+                        u.active, u.deact_reason = 0, f"Desactivada por {USER.name}"
+                        s.commit()
+                    st.session_state.user_msg = f"Cuenta «{tgt.username}» desactivada."
+                    st.rerun()
+                if not tgt.active and p3.button("Reactivar y enviar acceso", key="own_on", type="primary"):
+                    tmp = INITIAL_PW or db.temp_password()
+                    with db.Session() as s:
+                        u = s.get(db.User, tgt.id)
+                        u.active, u.deact_reason, u.must_change = 1, "", 1
+                        u.pw_hash, u.created_at, u.failed, u.locked_until = db.hash_pw(tmp), datetime.utcnow(), 0, None
+                        s.commit()
+                    msg = f"Cuenta «{tgt.username}» reactivada con clave temporal."
+                    if tgt.email:
+                        subj, body = mailer.welcome_text(tgt.name, tgt.username, tmp, APP_URL, f"Reactivada por {USER.name}.", reactivated=True)
+                        msg += " " + mailer.send(st.secrets, tgt.email, subj, body)[1]
+                    elif not INITIAL_PW:
+                        st.session_state.new_temp = (tgt.username, tmp)
+                    st.session_state.user_msg = msg
+                    st.rerun()
+                if tgt.locked_until and tgt.locked_until > _nowu and p4.button("Desbloquear", key="own_unlock"):
+                    with db.Session() as s:
+                        u = s.get(db.User, tgt.id)
+                        u.locked_until, u.failed = None, 0
+                        s.commit()
+                    st.session_state.user_msg = f"Cuenta «{tgt.username}» desbloqueada."
+                    st.rerun()
+            if not mailer.configured(st.secrets):
+                st.caption("📧 El envío de correos está apagado: agrega SMTP_USER y SMTP_PASSWORD en los Secrets para activarlo.")
 
         if IS_OWNER:
             st.markdown("**🔑 Solicitudes de recuperación de contraseña**")
@@ -734,28 +838,40 @@ if IS_ADMIN:
             st.markdown("**Crear usuario**")
             nu = st.text_input("Usuario (vacío = primera letra del nombre + primer apellido)")
             nn = st.text_input("Nombre y apellidos")
+            nm = st.text_input("Correo (para enviarle su acceso)")
             nr = st.selectbox("Perfil", list(ROLES), format_func=lambda r: ROLES[r][0])
-            npw = st.text_input("Contraseña inicial (vacío = clave inicial estándar)", type="password")
-            st.caption("Si la dejas vacía se asigna la clave inicial estándar. El usuario debe cambiarla al entrar.")
+            npw = st.text_input("Contraseña inicial" + (" (vacío = clave inicial estándar)" if INITIAL_PW else ""), type="password")
+            st.caption(("Si la dejas vacía se asigna la clave inicial estándar. " if INITIAL_PW else "")
+                       + f"El usuario debe cambiarla al entrar y tiene {db.FIRST_LOGIN_DAYS} días para hacerlo.")
             if st.form_submit_button("Crear"):
                 uname = nu.strip().lower() or make_username(nn)
-                npw = npw or INITIAL_PW
+                npw = npw or INITIAL_PW or ""
+                mail = nm.strip().lower()
                 if not uname or " " in uname or len(npw) < 8 or not nn.strip():
                     st.error("Completa usuario sin espacios, nombre y una contraseña de al menos 8 caracteres.")
+                elif mail and ("@" not in mail or "." not in mail.split("@")[-1]):
+                    st.error("El correo no parece válido.")
                 else:
                     with db.Session() as s:
                         if s.scalar(select(db.User).where(db.User.username == uname)):
                             st.error(f"El usuario «{uname}» ya existe. Agrégale un número al final, por ejemplo «{free_username(s, uname)}», y vuelve a crear.")
                         else:
-                            s.add(db.User(username=uname, name=nn.strip(), role=nr, pw_hash=db.hash_pw(npw), must_change=1))
+                            s.add(db.User(username=uname, name=nn.strip(), role=nr, pw_hash=db.hash_pw(npw), must_change=1,
+                                          email=mail, created_at=datetime.utcnow()))
                             s.commit()
-                            st.session_state.toast = "Usuario creado"
+                            msg = f"Usuario «{uname}» creado."
+                            if mail:
+                                subj, body = mailer.welcome_text(nn.strip(), uname, npw, APP_URL, f"Cualquier duda, escríbele a {USER.name}.")
+                                sent_ok, info = mailer.send(st.secrets, mail, subj, body)
+                                msg += " " + info
+                            st.session_state.user_msg = msg
                             st.rerun()
         with u2.form("pw", clear_on_submit=True):
             st.markdown("**Cambiar contraseña / desactivar**")
             who = st.selectbox("Usuario", [u.username for u in users])
             pw2 = st.text_input("Nueva contraseña (vacío = no cambiar)", type="password")
-            rst = st.checkbox("Restablecer a la clave inicial estándar")
+            em2 = st.text_input("Correo (vacío = no cambiar)")
+            rst = st.checkbox("Restablecer a la clave inicial estándar", disabled=not INITIAL_PW)
             act = st.checkbox("Activo", value=True)
             if st.form_submit_button("Guardar"):
                 if rst:
@@ -772,6 +888,11 @@ if IS_ADMIN:
                         if pw2:
                             u.pw_hash = db.hash_pw(pw2)
                             u.must_change = 0 if who == USER.username else 1
+                            u.locked_until, u.failed = None, 0
+                        if em2.strip():
+                            u.email = em2.strip().lower()
+                        if act and not u.active:
+                            u.created_at, u.deact_reason = datetime.utcnow(), ""  # nuevo plazo de primer ingreso
                         u.active = 1 if act else 0
                         s.commit()
                     st.session_state.toast = "Usuario actualizado"

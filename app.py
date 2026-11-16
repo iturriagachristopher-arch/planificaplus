@@ -19,7 +19,7 @@ st.set_page_config(page_title="PlanificA+ · Control de obra", page_icon="icon.p
 
 ACCENT, WARN, OK, BAD, BASE, INK = "#1F4E8C", "#D99A1E", "#1FA38A", "#C0392B", "#AEB8C4", "#14213D"
 st.markdown("""<style>
-.block-container{padding-top:1.6rem}
+.block-container{padding-top:3.2rem}
 .pill{display:inline-block;padding:2px 10px;border-radius:999px;font-weight:600;font-size:.82rem}
 .p-draft{background:#E2E9F4;color:#3E5A86}.p-live{background:#DDF3EE;color:#13806C}.p-edit{background:#FBEFD6;color:#9A6408}
 .brand{font-size:2rem;font-weight:700;letter-spacing:.01em}.brand b{color:#1F4E8C}

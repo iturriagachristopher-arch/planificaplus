@@ -12,6 +12,7 @@ from sqlalchemy.orm import declarative_base, sessionmaker
 import logic
 
 Base = declarative_base()
+SCHEMA = 3  # súbelo cuando agregues columnas nuevas (fuerza la migración en Streamlit Cloud)
 
 
 class User(Base):

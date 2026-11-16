@@ -58,12 +58,12 @@ SESSION_MIN = 30  # minutos sin actividad antes de cerrar la sesión
 
 
 @st.cache_resource
-def _init():
+def _init(schema: int):  # cambiar SCHEMA en db.py fuerza a correr de nuevo las migraciones
     db.init_db(DEMO_PW)
     return True
 
 
-_init()
+_init(db.SCHEMA)
 
 
 # ---------------------------------------------------------------- sesión

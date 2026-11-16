@@ -58,11 +58,11 @@ def ask(prov: tuple[str, str, str], context: str, history: list[dict], question:
         models = [model] + [m for m in GEMINI_FALLBACKS if m != model]
         body = {"system_instruction": {"parts": [{"text": system}]},
                 "contents": [{"role": "model" if t["role"] == "assistant" else "user", "parts": [{"text": t["content"]}]} for t in turns],
-                "generationConfig": {"temperature": 0.2, "maxOutputTokens": 1500}}
+                "generationConfig": {"temperature": 0.2, "maxOutputTokens": 8192}}
         last = None
         for m in models:
             r = requests.post(f"https://generativelanguage.googleapis.com/v1beta/models/{m}:generateContent",
-                              headers={"x-goog-api-key": key, "Content-Type": "application/json"}, json=body, timeout=60)
+                              headers={"x-goog-api-key": key, "Content-Type": "application/json"}, json=body, timeout=90)
             last = r.status_code
             if r.status_code in (404, 500, 503, 429):
                 continue
@@ -72,7 +72,11 @@ def ask(prov: tuple[str, str, str], context: str, history: list[dict], question:
                 continue
             data = r.json()
             try:
-                return "".join(p.get("text", "") for p in data["candidates"][0]["content"]["parts"]).strip() or OFF_TOPIC
+                cand = data["candidates"][0]
+                txt = "".join(p.get("text", "") for p in cand["content"]["parts"]).strip()
+                if txt and cand.get("finishReason") == "MAX_TOKENS":
+                    txt += "\n\n_(Respuesta recortada por largo: pide un resumen más breve.)_"
+                return txt or OFF_TOPIC
             except (KeyError, IndexError):
                 return OFF_TOPIC
         if last == 429:

@@ -23,7 +23,7 @@ ACCENT, WARN, OK, BAD, BASE, INK = "#1F4E8C", "#D99A1E", "#1FA38A", "#C0392B", "
 st.markdown("""<style>
 .block-container{padding-top:3.2rem}
 .pill{display:inline-block;padding:2px 10px;border-radius:999px;font-weight:600;font-size:.82rem}
-.p-draft{background:#E2E9F4;color:#3E5A86}.p-live{background:#DDF3EE;color:#13806C}.p-edit{background:#FBEFD6;color:#9A6408}
+.p-draft{background:#E2E9F4;color:#3E5A86}.p-live{background:#DDF3EE;color:#13806C}.p-edit{background:#FBEFD6;color:#9A6408}.p-closed{background:#E6E8EB;color:#555E68}
 .brand{font-size:2rem;font-weight:700;letter-spacing:.01em}.brand b{color:#1F4E8C}
 </style>""", unsafe_allow_html=True)
 
@@ -221,7 +221,7 @@ with st.sidebar:
         ids = [p.id for p in projects]
         default = st.session_state.get("pid", ids[0])
         PID = st.selectbox("Proyecto", ids, index=ids.index(default) if default in ids else 0,
-                           format_func=lambda i: next(p.name for p in projects if p.id == i))
+                           format_func=lambda i: next(("🔒 " if p.status == "closed" else "") + p.name for p in projects if p.id == i))
         st.session_state.pid = PID
     CORTE = st.date_input("Fecha de corte", value=date.today(), help="Fecha usada para calcular el avance plan. Por defecto, hoy.")
     if IS_OWNER:
@@ -271,7 +271,8 @@ def mutate(fn):
 
 # ---------------------------------------------------------------- encabezado
 dev_end = (CUR["end"] - BAS["end"]).days
-pill = {"draft": ("Borrador", "p-draft"), "live": ("En marcha", "p-live"), "edit": ("Editando", "p-edit")}[P.status]
+pill = {"draft": ("Borrador", "p-draft"), "live": ("En marcha", "p-live"), "edit": ("Editando", "p-edit"),
+        "closed": ("Cerrado", "p-closed")}[P.status]
 @st.dialog("❓ Ayuda de PlanificA+", width="large")
 def dlg_help():
     ht = st.tabs(list(help_text.SECTIONS))
@@ -1019,6 +1020,39 @@ if IS_ADMIN:
                     s.commit()
                     st.session_state.pid = np_.id
                 st.rerun()
+        st.markdown(f"**Proyecto seleccionado: {P.name}**")
+        if P.status == "closed":
+            st.info("Este proyecto está **cerrado**: se puede consultar (Gantt, historial, KPI, Excel) pero no modificar.")
+            if st.button("🔓 Reabrir proyecto"):
+                def f(s, p):
+                    p.status = "live" if p.baseline_by else "draft"
+                mutate(f)
+                st.session_state.toast = "Proyecto reabierto"
+                st.rerun()
+        else:
+            with st.expander("🔒 Cerrar proyecto"):
+                st.write("El proyecto queda en la lista como **cerrado**, con todo su historial, en solo lectura. Se puede reabrir.")
+                sure_c = st.checkbox("Confirmo que la obra terminó o se suspende", key="sure_close")
+                if st.button("Cerrar proyecto", disabled=not sure_c):
+                    def f(s, p):
+                        p.status, p.snapshot, p.edit_by = "closed", [], ""
+                    mutate(f)
+                    st.session_state.toast = "Proyecto cerrado"
+                    st.rerun()
+        if IS_OWNER:
+            with st.expander("🗑️ Eliminar proyecto (solo el dueño)"):
+                st.warning("Borra el proyecto **y todo su historial** (cambios y avances). No se puede deshacer.")
+                conf = st.text_input("Escribe ELIMINAR para confirmar", key="del_conf")
+                if st.button("Eliminar definitivamente", type="primary", disabled=conf.strip().upper() != "ELIMINAR"):
+                    with db.Session() as s:
+                        for m in (db.Change, db.Progress):
+                            for row_ in s.scalars(select(m).where(m.project_id == PID)).all():
+                                s.delete(row_)
+                        s.delete(s.get(db.Project, PID))
+                        s.commit()
+                    st.session_state.pop("pid", None)
+                    st.session_state.toast = "Proyecto eliminado"
+                    st.rerun()
         with st.expander("Restaurar el proyecto de ejemplo"):
             st.write("Reemplaza el proyecto seleccionado por el ejemplo inicial, con su historial. No se puede deshacer.")
             sure = st.checkbox("Entiendo que se perderán los datos de este proyecto")

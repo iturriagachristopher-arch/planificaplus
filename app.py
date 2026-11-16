@@ -17,12 +17,12 @@ from logic import AREAS, ROLES, CAUSES, TOL_OK, TOL_HIGH
 
 st.set_page_config(page_title="PlanificA+ · Control de obra", page_icon="icon.png" if __import__("os").path.exists("icon.png") else "📐", layout="wide")
 
-ACCENT, WARN, OK, BAD, BASE, INK = "#0E5E52", "#C98A12", "#2F7A3A", "#AE2A21", "#A9B3AE", "#17201D"
+ACCENT, WARN, OK, BAD, BASE, INK = "#1F4E8C", "#D99A1E", "#1FA38A", "#C0392B", "#AEB8C4", "#14213D"
 st.markdown("""<style>
 .block-container{padding-top:1.6rem}
 .pill{display:inline-block;padding:2px 10px;border-radius:999px;font-weight:600;font-size:.82rem}
-.p-draft{background:#E2E9F4;color:#3E5A86}.p-live{background:#E3F1E4;color:#2F7A3A}.p-edit{background:#FBEFD6;color:#9A6408}
-.brand{font-size:2rem;font-weight:700;letter-spacing:.01em}.brand b{color:#0E5E52}
+.p-draft{background:#E2E9F4;color:#3E5A86}.p-live{background:#DDF3EE;color:#13806C}.p-edit{background:#FBEFD6;color:#9A6408}
+.brand{font-size:2rem;font-weight:700;letter-spacing:.01em}.brand b{color:#1F4E8C}
 </style>""", unsafe_allow_html=True)
 
 
@@ -429,11 +429,11 @@ with T[0]:
                       line=dict(color=BAD, width=2, dash="dot"))
         fig.add_annotation(x=CORTE.isoformat(), y=1.02, yref="paper", text="corte", showarrow=False, font=dict(color=BAD))
         fig.update_layout(barmode="overlay", height=max(320, 34 * len(TASKS) + 90), margin=dict(l=10, r=10, t=30, b=10),
-                          xaxis=dict(type="date", gridcolor="#E4E8E5"),
+                          xaxis=dict(type="date", gridcolor="#E3E9F0"),
                           yaxis=dict(autorange="reversed", categoryorder="array", categoryarray=labels),
                           legend=dict(orientation="h", y=-0.08), plot_bgcolor="white")
         st.plotly_chart(fig, width="stretch")
-        st.caption("Verde oscuro: programa actual · Gris: línea base · Amarillo: etapa con cambios · Verde: etapa agregada · Línea negra: avance real")
+        st.caption("Azul: programa actual · Gris: línea base · Amarillo: etapa con cambios · Turquesa: etapa agregada · Línea oscura: avance real")
         st.dataframe(DF, hide_index=True, width="stretch",
                      column_config={"Inicio": st.column_config.DateColumn(format="DD-MM-YYYY"),
                                     "Fin": st.column_config.DateColumn(format="DD-MM-YYYY"),

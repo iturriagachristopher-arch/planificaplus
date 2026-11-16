@@ -13,6 +13,7 @@ import db
 import ia
 import mailer
 import planner
+import help_text
 import logic
 from logic import AREAS, ROLES, CAUSES, TOL_OK, TOL_HIGH
 
@@ -271,7 +272,17 @@ def mutate(fn):
 # ---------------------------------------------------------------- encabezado
 dev_end = (CUR["end"] - BAS["end"]).days
 pill = {"draft": ("Borrador", "p-draft"), "live": ("En marcha", "p-live"), "edit": ("Editando", "p-edit")}[P.status]
-st.markdown(f'### {P.name} <span class="pill {pill[1]}">{pill[0]}</span>', unsafe_allow_html=True)
+@st.dialog("❓ Ayuda de PlanificA+", width="large")
+def dlg_help():
+    ht = st.tabs(list(help_text.SECTIONS))
+    for tab_, body in zip(ht, help_text.SECTIONS.values()):
+        tab_.markdown(body)
+
+
+_h1, _h2 = st.columns([8, 1])
+_h1.markdown(f'### {P.name} <span class="pill {pill[1]}">{pill[0]}</span>', unsafe_allow_html=True)
+if _h2.button("❓ Ayuda", width="stretch"):
+    dlg_help()
 st.caption(f"Inicio {fmt(P.start)} · versión v{P.version}" +
            (f" · línea base aprobada por {P.baseline_by} el {fmt(P.baseline_at)}" if not DRAFT else " · sin línea base")
            + (f" · en edición por {P.edit_by}" if EDIT else ""))

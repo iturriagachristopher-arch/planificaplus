@@ -29,6 +29,10 @@ try:
 except Exception:
     DEMO_PW = "planifica2026"
 try:
+    INITIAL_PW = str(st.secrets["INITIAL_PASSWORD"])
+except Exception:
+    INITIAL_PW = "Inicio1234"  # clave inicial estándar: el usuario debe cambiarla al entrar
+try:
     OWNER = str(st.secrets["APP_OWNER"]).strip().lower()
 except Exception:
     OWNER = "christopher"  # dueño de la app: el único que resuelve recuperaciones de clave
@@ -84,6 +88,26 @@ def login_view():
         st.caption("Prototipo A+S · AIEP Santiago Norte · Leslie Vera, Christopher Iturriaga, Andrés Molina")
 
 
+def make_username(full_name: str) -> str:
+    """Primera letra del nombre + primer apellido, sin tildes ni espacios (Christopher Iturriaga → citurriaga)."""
+    import unicodedata
+    clean = unicodedata.normalize("NFKD", full_name).encode("ascii", "ignore").decode().lower()
+    w = ["".join(ch for ch in x if ch.isalnum()) for x in clean.split()]
+    w = [x for x in w if x]
+    if len(w) < 2:
+        return w[0] if w else ""
+    ap = w[-2] if len(w) >= 4 else w[1]  # Nombre1 Nombre2 Apellido1 Apellido2 → Apellido1
+    return w[0][0] + ap
+
+
+def free_username(s, base: str) -> str:
+    """Primer nombre de usuario libre agregando un número al final: citurriaga2, citurriaga3…"""
+    n = 2
+    while s.scalar(select(db.User).where(db.User.username == f"{base}{n}")):
+        n += 1
+    return f"{base}{n}"
+
+
 def pw_form(key: str, need_current: bool, user) -> None:
     """Formulario para que el usuario defina su propia contraseña."""
     with st.form(key, clear_on_submit=True):
@@ -100,6 +124,8 @@ def pw_form(key: str, need_current: bool, user) -> None:
             st.error("Las contraseñas nuevas no coinciden.")
         elif n1 == cur:
             st.error("La nueva contraseña debe ser distinta de la actual.")
+        elif n1 == INITIAL_PW:
+            st.error("No puedes usar la clave inicial estándar como tu contraseña.")
         else:
             with db.Session() as s:
                 u_ = s.get(db.User, user.id)
@@ -586,7 +612,7 @@ def project_context() -> str:
     lines = [f"Proyecto: {P.name}", f"Estado: {pill[0]} · versión v{P.version} · inicio {fmt(P.start)}",
              f"Fecha de corte: {fmt(CORTE)}",
              f"Término línea base: {'sin línea base' if DRAFT else fmt(BAS['end'])} · término actual: {fmt(CUR['end'])} · desviación: {dev_end:+d} días",
-             f"Avance plan {p_plan}% · avance real {p_real}% · desviación {p_real - p_plan:+d} pp · semáforo {lbl}",
+             f"Avance plan {p_plan}% · avance real {p_real}% · desviación {p_real - p_plan:+d} pp · semáforo {lvl} ({lbl})",
              "", "ETAPAS (tabla CSV):", DF.drop(columns=["Depende de"]).to_csv(index=False)]
     if CHANGES:
         lines += ["", "CAMBIOS APROBADOS:"] + [f"{c.code} | {fmt(c.date)} | {c.user} | v{c.version} | impacto {c.impact:+d} d | {c.cause} | {c.reason} | "
@@ -706,18 +732,20 @@ if IS_ADMIN:
         u1, u2 = st.columns(2)
         with u1.form("newuser", clear_on_submit=True):
             st.markdown("**Crear usuario**")
-            nu = st.text_input("Usuario (sin espacios)")
-            nn = st.text_input("Nombre")
+            nu = st.text_input("Usuario (vacío = primera letra del nombre + primer apellido)")
+            nn = st.text_input("Nombre y apellidos")
             nr = st.selectbox("Perfil", list(ROLES), format_func=lambda r: ROLES[r][0])
-            npw = st.text_input("Contraseña inicial", type="password")
+            npw = st.text_input("Contraseña inicial (vacío = clave inicial estándar)", type="password")
+            st.caption("Si la dejas vacía se asigna la clave inicial estándar. El usuario debe cambiarla al entrar.")
             if st.form_submit_button("Crear"):
-                uname = nu.strip().lower()
+                uname = nu.strip().lower() or make_username(nn)
+                npw = npw or INITIAL_PW
                 if not uname or " " in uname or len(npw) < 8 or not nn.strip():
                     st.error("Completa usuario sin espacios, nombre y una contraseña de al menos 8 caracteres.")
                 else:
                     with db.Session() as s:
                         if s.scalar(select(db.User).where(db.User.username == uname)):
-                            st.error("Ese usuario ya existe.")
+                            st.error(f"El usuario «{uname}» ya existe. Agrégale un número al final, por ejemplo «{free_username(s, uname)}», y vuelve a crear.")
                         else:
                             s.add(db.User(username=uname, name=nn.strip(), role=nr, pw_hash=db.hash_pw(npw), must_change=1))
                             s.commit()
@@ -727,8 +755,11 @@ if IS_ADMIN:
             st.markdown("**Cambiar contraseña / desactivar**")
             who = st.selectbox("Usuario", [u.username for u in users])
             pw2 = st.text_input("Nueva contraseña (vacío = no cambiar)", type="password")
+            rst = st.checkbox("Restablecer a la clave inicial estándar")
             act = st.checkbox("Activo", value=True)
             if st.form_submit_button("Guardar"):
+                if rst:
+                    pw2 = INITIAL_PW
                 if pw2 and len(pw2) < 8:
                     st.error("La contraseña debe tener al menos 8 caracteres.")
                 elif who == USER.username and not act:

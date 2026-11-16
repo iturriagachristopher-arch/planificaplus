@@ -12,6 +12,7 @@ from sqlalchemy import select
 import db
 import ia
 import mailer
+import planner
 import logic
 from logic import AREAS, ROLES, CAUSES, TOL_OK, TOL_HIGH
 
@@ -244,9 +245,12 @@ def load() -> db.Project:
 
 
 P = load()
-TASKS, BASEL = P.tasks, P.baseline
-CUR = logic.schedule(P.start, TASKS)
-BAS = logic.schedule(P.start, BASEL)
+CAL = P.calendar or "corridos"
+TASKS, BASEL = logic.ensure_wbs(P.tasks), logic.ensure_wbs(P.baseline)
+CUR = logic.schedule(P.start, TASKS, CAL)
+BAS = logic.schedule(P.start, BASEL, CAL)
+SUMM = CUR["summ"]
+LEAVES = [t for t in TASKS if t["code"] not in SUMM]
 IN_BASE = {t["code"] for t in BASEL}
 DRAFT, LIVE, EDIT = P.status == "draft", P.status == "live", P.status == "edit"
 I_EDIT = EDIT and (P.edit_by == USER.name)
@@ -274,6 +278,13 @@ st.caption(f"Inicio {fmt(P.start)} · versión v{P.version}" +
 
 pct_plan = {t["code"]: logic.pct_at(CUR["at"].get(t["code"]), t["dur"], CORTE) for t in TASKS}
 pct_real = {t["code"]: int(t.get("real_pct") or 0) for t in TASKS}
+WBS_OF = {t["code"]: str(t["wbs"]) for t in TASKS}
+for _c in SUMM:  # avance de un resumen = promedio ponderado de sus tareas
+    _sub = [t for t in LEAVES if WBS_OF[t["code"]].startswith(WBS_OF[_c] + ".")]
+    pct_plan[_c], pct_real[_c] = logic.weighted(_sub, pct_plan), logic.weighted(_sub, pct_real)
+USERS_ALL = {}
+with db.Session() as _s:
+    USERS_ALL = {u.username: u.name for u in _s.scalars(select(db.User).where(db.User.active == 1)).all()}
 p_plan, p_real = logic.weighted(TASKS, pct_plan), logic.weighted(TASKS, pct_real)
 p_orig = logic.weighted(BASEL, {t["code"]: logic.pct_at(BAS["at"].get(t["code"]), t["dur"], CORTE) for t in BASEL})
 lvl, lbl = logic.semaforo(p_plan - p_real)
@@ -307,7 +318,7 @@ def dlg_save():
     if not items:
         st.info("No hay cambios: modifica, agrega o elimina una etapa primero.")
         return
-    e0 = logic.schedule(P.start, P.snapshot)["end"]
+    e0 = logic.schedule(P.start, P.snapshot, CAL)["end"]
     imp = (CUR["end"] - e0).days
     for it in items:
         st.write("• " + logic.change_text(it))
@@ -350,7 +361,7 @@ if "toast" in st.session_state:
     st.toast(st.session_state.pop("toast"))
 
 # ---------------------------------------------------------------- tablas base
-num = {t["code"]: i + 1 for i, t in enumerate(TASKS)}
+num = {t["code"]: str(t["wbs"]) for t in TASKS}
 touched = set()
 with db.Session() as s:
     CHANGES = s.scalars(select(db.Change).where(db.Change.project_id == PID).order_by(db.Change.id)).all()
@@ -387,15 +398,21 @@ def row(t, i):
         lv, lb = logic.semaforo(dev)
         sem = {"verde": "🟢", "amarillo": "🟡", "rojo": "🔴"}[lv] + " " + lb
     vs = None if DRAFT or t["code"] not in IN_BASE else (e_ - BAS["at"][t["code"]][1]).days
-    return {"#": i + 1, "Etapa": t["name"], "Área": AREAS[t["area"]],
-            "Depende de": ", ".join(str(num[d]) for d in t["deps"] if d in num) or "—",
-            "Duración (d)": t["dur"], "Atraso (d)": t["lag"], "Inicio": s_, "Fin": e_, "vs base (d)": vs,
+    is_s = t["code"] in SUMM
+    kind = "Resumen" if is_s else (t.get("kind") or "Tarea")
+    lvl = str(t["wbs"]).count(".")
+    return {"#": str(t["wbs"]), "Etapa": "\u2003" * lvl + ("▸ " if is_s else "◆ " if kind == "Hito" else "") + t["name"],
+            "Tipo": kind, "Área": AREAS[t["area"]], "Responsable": USERS_ALL.get(t.get("resp") or "", t.get("resp") or "—"),
+            "Depende de": logic.preds_text(t, WBS_OF) or "—",
+            "Duración (d)": (e_ - s_).days if is_s else (0 if kind == "Hito" else t["dur"]), "Atraso (d)": t["lag"],
+            "Inicio": s_, "Fin": e_, "Holgura (d)": None if is_s else CUR["slack"].get(t["code"]),
+            "Crítica": "🔴" if t["code"] in CUR["crit"] else "", "vs base (d)": vs,
             "Avance plan %": plan, "Avance real %": real, "Desv. (pp)": real - plan, "Semáforo": sem, "Nota": note}
 
 
 DF = pd.DataFrame([row(t, i) for i, t in enumerate(TASKS)])
 
-tabs = ["📊 Carta Gantt", "✅ Avance real", "🛠️ Etapas", "🧾 Historial", "📈 KPI", "🤖 Asistente IA"] + (["⚙️ Administración"] if IS_ADMIN else [])
+tabs = ["📊 Carta Gantt", "✅ Avance real", "🧩 Programa", "🧾 Historial", "📈 KPI", "🤖 Asistente IA"] + (["⚙️ Administración"] if IS_ADMIN else [])
 T = st.tabs(tabs)
 
 # ---------------------------------------------------------------- Gantt
@@ -403,38 +420,62 @@ with T[0]:
     if not TASKS:
         st.info("El proyecto no tiene etapas. Agrega la primera en la pestaña Etapas.")
     else:
-        labels = [f"{i + 1:02d} · {t['name'][:42]}" for i, t in enumerate(TASKS)]
+        f1, f2, f3 = st.columns([1.2, 1.6, 2])
+        only_crit = f1.toggle("Solo ruta crítica", key="g_crit")
+        resp_opts = ["Todos"] + sorted({t.get("resp") for t in TASKS if t.get("resp")})
+        f_resp = f2.selectbox("Responsable", resp_opts, key="g_resp",
+                              format_func=lambda u: u if u == "Todos" else USERS_ALL.get(u, u))
+        f3.caption(f"Calendario: **{logic.CALENDARS[CAL]}** · Ruta crítica: tareas sin holgura (🔴)")
+        VIEW = [t for t in TASKS if (not only_crit or t["code"] in CUR["crit"] or t["code"] in SUMM)
+                and (f_resp == "Todos" or t.get("resp") == f_resp or t["code"] in SUMM)]
+        span = lambda c: (CUR["at"][c][1] - CUR["at"][c][0]).days
+        labels = [(lambda x: f"<b>{x}</b>" if t["code"] in SUMM else x)(f"{t['wbs']} · " + t["name"][:42]) for t in VIEW]
         fig = go.Figure()
         ms = lambda d: d * 86400000
         if not DRAFT:
-            bx = [(lab, BAS["at"][t["code"]]) for lab, t in zip(labels, TASKS) if t["code"] in IN_BASE]
+            bx = [(lab, BAS["at"][t["code"]]) for lab, t in zip(labels, VIEW) if t["code"] in IN_BASE and t["code"] in BAS["at"]]
             fig.add_bar(y=[b[0] for b in bx], base=[b[1][0].isoformat() for b in bx],
                         x=[ms(max((b[1][1] - b[1][0]).days, 0.6)) for b in bx], orientation="h",
                         marker_color=BASE, width=0.18, offset=0.2, name="Línea base", hoverinfo="skip")
-        cols = []
-        for t in TASKS:
+        snap = {x["code"]: x for x in P.snapshot} if EDIT else {}
+        rows_t = [(lab, t) for lab, t in zip(labels, VIEW) if t["code"] not in SUMM and t.get("kind") != "Hito"]
+        cols, lines = [], []
+        for _, t in rows_t:
             new = not DRAFT and t["code"] not in IN_BASE
-            snap = {x["code"]: x for x in P.snapshot} if EDIT else {}
             chg = t["code"] in touched or (EDIT and t["code"] in snap and (snap[t["code"]]["dur"] != t["dur"] or snap[t["code"]]["lag"] != t["lag"]))
             cols.append(OK if new else WARN if chg else ACCENT)
-        fig.add_bar(y=labels, base=[CUR["at"][t["code"]][0].isoformat() for t in TASKS],
-                    x=[ms(max(t["dur"], 0.6)) for t in TASKS], orientation="h", marker_color=cols, width=0.45,
-                    offset=-0.3, name="Programa actual",
-                    customdata=[[fmt(CUR["at"][t["code"]][0]), fmt(CUR["at"][t["code"]][1]), pct_plan[t["code"]], pct_real[t["code"]]] for t in TASKS],
-                    hovertemplate="%{y}<br>%{customdata[0]} → %{customdata[1]}<br>Plan %{customdata[2]}% · Real %{customdata[3]}%<extra></extra>")
-        fig.add_bar(y=labels, base=[CUR["at"][t["code"]][0].isoformat() for t in TASKS],
-                    x=[ms(max(t["dur"], 0.6) * pct_real[t["code"]] / 100) for t in TASKS], orientation="h",
+            lines.append(BAD if t["code"] in CUR["crit"] else "rgba(0,0,0,0)")
+        cd = lambda t: [fmt(CUR["at"][t["code"]][0]), fmt(CUR["at"][t["code"]][1]), pct_plan[t["code"]], pct_real[t["code"]],
+                        USERS_ALL.get(t.get("resp") or "", t.get("resp") or "—"), CUR["slack"].get(t["code"], "—")]
+        hov = "%{y}<br>%{customdata[0]} → %{customdata[1]}<br>Plan %{customdata[2]}% · Real %{customdata[3]}%<br>Responsable: %{customdata[4]} · Holgura: %{customdata[5]} d<extra></extra>"
+        fig.add_bar(y=[l for l, _ in rows_t], base=[CUR["at"][t["code"]][0].isoformat() for _, t in rows_t],
+                    x=[ms(max(span(t["code"]), 0.6)) for _, t in rows_t], orientation="h", marker_color=cols,
+                    marker_line=dict(color=lines, width=2), width=0.45, offset=-0.3, name="Tarea",
+                    customdata=[cd(t) for _, t in rows_t], hovertemplate=hov)
+        fig.add_bar(y=[l for l, _ in rows_t], base=[CUR["at"][t["code"]][0].isoformat() for _, t in rows_t],
+                    x=[ms(max(span(t["code"]), 0.6) * pct_real[t["code"]] / 100) for _, t in rows_t], orientation="h",
                     marker_color=INK, width=0.14, offset=-0.14, name="Avance real", hoverinfo="skip")
+        rows_s = [(lab, t) for lab, t in zip(labels, VIEW) if t["code"] in SUMM]
+        if rows_s:
+            fig.add_bar(y=[l for l, _ in rows_s], base=[CUR["at"][t["code"]][0].isoformat() for _, t in rows_s],
+                        x=[ms(max(span(t["code"]), 0.6)) for _, t in rows_s], orientation="h", marker_color=INK,
+                        width=0.16, offset=-0.08, name="Resumen", customdata=[cd(t) for _, t in rows_s], hovertemplate=hov)
+        rows_m = [(lab, t) for lab, t in zip(labels, VIEW) if t.get("kind") == "Hito" and t["code"] not in SUMM]
+        if rows_m:
+            fig.add_scatter(y=[l for l, _ in rows_m], x=[CUR["at"][t["code"]][0].isoformat() for _, t in rows_m], mode="markers",
+                            marker=dict(symbol="diamond", size=14, color=[BAD if t["code"] in CUR["crit"] else INK for _, t in rows_m]),
+                            name="Hito", customdata=[cd(t) for _, t in rows_m], hovertemplate=hov)
         fig.add_shape(type="line", x0=CORTE.isoformat(), x1=CORTE.isoformat(), y0=0, y1=1, yref="paper",
                       line=dict(color=BAD, width=2, dash="dot"))
         fig.add_annotation(x=CORTE.isoformat(), y=1.02, yref="paper", text="corte", showarrow=False, font=dict(color=BAD))
-        fig.update_layout(barmode="overlay", height=max(320, 34 * len(TASKS) + 90), margin=dict(l=10, r=10, t=30, b=10),
+        fig.update_layout(barmode="overlay", height=max(320, 30 * len(VIEW) + 90), margin=dict(l=10, r=10, t=30, b=10),
                           xaxis=dict(type="date", gridcolor="#E3E9F0"),
                           yaxis=dict(autorange="reversed", categoryorder="array", categoryarray=labels),
                           legend=dict(orientation="h", y=-0.08), plot_bgcolor="white")
         st.plotly_chart(fig, width="stretch")
-        st.caption("Azul: programa actual · Gris: línea base · Amarillo: etapa con cambios · Turquesa: etapa agregada · Línea oscura: avance real")
-        st.dataframe(DF, hide_index=True, width="stretch",
+        st.caption("Azul: tarea · Borde rojo: ruta crítica · Barra oscura delgada: resumen · ◆ Hito · Gris: línea base · "
+                   "Amarillo: tarea con cambios · Turquesa: tarea agregada · Línea oscura interior: avance real")
+        st.dataframe(DF[DF["#"].isin([str(t["wbs"]) for t in VIEW])], hide_index=True, width="stretch",
                      column_config={"Inicio": st.column_config.DateColumn(format="DD-MM-YYYY"),
                                     "Fin": st.column_config.DateColumn(format="DD-MM-YYYY"),
                                     "Avance plan %": st.column_config.ProgressColumn(min_value=0, max_value=100, format="%d%%"),
@@ -447,7 +488,9 @@ with T[1]:
     if not LIVE:
         st.info("El avance real se informa con el programa **En marcha** (no en borrador ni durante una edición).")
     else:
-        mine = [t for t in TASKS if can(t["area"]) and not t.get("real_end")]
+        only_mine = st.toggle("👤 Solo mis tareas (donde soy responsable)", key="av_mine")
+        mine = [t for t in LEAVES if (t.get("resp") == USER.username if only_mine else (can(t["area"]) or t.get("resp") == USER.username))
+                and not t.get("real_end")]
         if not mine:
             st.info("No tienes etapas abiertas de tu área.")
         else:
@@ -494,78 +537,122 @@ with T[1]:
                  column_config={"Avance plan %": st.column_config.ProgressColumn(min_value=0, max_value=100, format="%d%%"),
                                 "Avance real %": st.column_config.ProgressColumn(min_value=0, max_value=100, format="%d%%")})
 
-# ---------------------------------------------------------------- Etapas
+# ---------------------------------------------------------------- Programa (tipo MS Project)
 with T[2]:
     editable = DRAFT or I_EDIT
+    CAN_PLAN = USER.role in ("admin", "pmo")
     if LIVE:
-        st.info("Para modificar etapas pulsa **Editar programa**. Cada cambio quedará registrado con ID, causa y justificación.")
+        st.info("Para modificar el programa pulsa **Editar programa**. Cada cambio quedará registrado con ID, causa y justificación.")
     elif EDIT and not I_EDIT:
         st.info(f"{P.edit_by} está editando el programa.")
     elif DRAFT and not MY_AREAS:
         st.info("Tu perfil es de solo lectura.")
-    if editable and MY_AREAS:
-        st.caption("Solo puedes modificar etapas de tu área. La ubicación ordena la lista; las dependencias definen las fechas.")
-        mode = st.radio("Acción", ["Agregar etapa", "Editar etapa", "Eliminar etapa"], horizontal=True)
-        own = [t for t in TASKS if can(t["area"])]
-        if mode == "Agregar etapa" or own:
-            t0 = None
-            if mode != "Agregar etapa":
-                c0 = st.selectbox("Etapa", [t["code"] for t in own], format_func=lambda c: f"{num[c]}. {next(t['name'] for t in TASKS if t['code'] == c)}")
-                t0 = next(t for t in TASKS if t["code"] == c0)
-            if mode == "Eliminar etapa":
-                deps = [t["name"] for t in TASKS if t0["code"] in t["deps"]]
-                if t0.get("real_start"):
-                    st.error("No se puede eliminar una etapa con avance real registrado.")
-                elif deps:
-                    st.error(f"No se puede eliminar: «{deps[0]}» depende de esta etapa.")
-                elif st.button("Eliminar etapa", type="primary"):
-                    def f(s, p):
-                        p.tasks = [x for x in p.tasks if x["code"] != t0["code"]]
-                    mutate(f)
-                    st.rerun()
-            else:
-                banned = logic.descendants(TASKS, t0["code"]) if t0 else set()
-                others = [t for t in TASKS if not t0 or t["code"] != t0["code"]]
-                with st.form("stage"):
-                    name = st.text_input("Nombre de la etapa", value=t0["name"] if t0 else "")
-                    g1, g2, g3 = st.columns(3)
-                    area = g1.selectbox("Área responsable", [t0["area"]] if t0 else MY_AREAS, format_func=AREAS.get, disabled=bool(t0))
-                    dur = g2.number_input("Duración (días)", 0, 1000, int(t0["dur"]) if t0 else 14)
-                    lag = g3.number_input("Atraso de inicio (días)", 0, 365, int(t0["lag"]) if t0 else 0)
-                    dep_opts = [t["code"] for t in others if t["code"] not in banned]
-                    deps = st.multiselect("Empieza cuando terminen (dependencias)", dep_opts, placeholder="Elige una o más etapas (vacío = inicio del proyecto)",
-                                          default=[d for d in (t0["deps"] if t0 else []) if d in dep_opts],
-                                          format_func=lambda c: f"{num[c]}. {next(t['name'] for t in TASKS if t['code'] == c)}")
-                    pos_opts = ["__first"] + [t["code"] for t in others]
-                    if t0:
-                        idx = TASKS.index(t0)
-                        pos_def = "__first" if idx == 0 else TASKS[idx - 1]["code"]
-                    else:
-                        pos_def = others[-1]["code"] if others else "__first"
-                    pos = st.selectbox("Ubicación en el proceso", pos_opts, index=pos_opts.index(pos_def),
-                                       format_func=lambda c: "Al comienzo de la lista" if c == "__first" else f"Después de {num[c]}. {next(t['name'] for t in TASKS if t['code'] == c)}")
-                    go_ = st.form_submit_button("Guardar etapa" if t0 else "Agregar etapa", type="primary")
-                if go_:
-                    if len(name.strip()) < 3:
-                        st.error("Escribe el nombre de la etapa.")
-                    else:
-                        def f(s, p):
-                            ts = p.tasks
-                            if t0:
-                                cur = next(x for x in ts if x["code"] == t0["code"])
-                                ts.remove(cur)
-                                cur.update(name=name.strip(), dur=int(dur), lag=int(lag), deps=deps)
-                            else:
-                                allc = [x["code"] for x in ts + p.baseline + p.snapshot]
-                                cur = {"code": logic.next_code(allc), "name": name.strip(), "area": area, "dur": int(dur), "lag": int(lag), "deps": deps}
-                            at = 0 if pos == "__first" else next(i for i, x in enumerate(ts) if x["code"] == pos) + 1
-                            ts.insert(at, cur)
-                            p.tasks = ts
-                        mutate(f)
-                        st.session_state.toast = "Listo. Guarda el cambio para registrarlo." if EDIT else "Etapa guardada en el borrador."
-                        st.rerun()
+
+    if editable and CAN_PLAN:
+        st.markdown("#### 🧩 Programa del proyecto")
+        st.caption("Escribe fila por fila como en una planilla. **EDT**: 1 = tarea global · 1.1 = subtarea · 1.1.1 = tarea. "
+                   "**Predecesoras**: `2.1.1` (fin-comienzo) · `2.1.1CC+3` (comienzo-comienzo con 3 días de desfase) · "
+                   "`5.2FF-2` · varias separadas por coma. Las tareas **Resumen** calculan solas sus fechas y avance.")
+        if DRAFT:
+            cal_new = st.radio("Calendario", list(logic.CALENDARS), index=list(logic.CALENDARS).index(CAL),
+                               format_func=logic.CALENDARS.get, horizontal=True, key="cal_sel")
         else:
-            st.info("No hay etapas de tu área todavía. Usa «Agregar etapa».")
+            cal_new = CAL
+            st.caption(f"Calendario: {logic.CALENDARS[CAL]} (se elige antes de poner en marcha).")
+        grid = st.data_editor(
+            planner.tasks_to_rows(TASKS), key=f"grid_{PID}_{P.version}_{P.status}", num_rows="dynamic", hide_index=True,
+            width="stretch", height=min(700, 38 * (len(TASKS) + 3)),
+            column_order=planner.COLS,
+            column_config={
+                "EDT": st.column_config.TextColumn("EDT", width="small", help="1 · 1.1 · 1.1.1"),
+                "Nombre": st.column_config.TextColumn("Nombre", width="large"),
+                "Tipo": st.column_config.SelectboxColumn("Tipo", options=logic.KINDS, default="Tarea", width="small"),
+                "Área": st.column_config.SelectboxColumn("Área", options=list(logic.AREAS.values()), default="Oficina técnica"),
+                "Responsable": st.column_config.SelectboxColumn("Responsable", options=sorted(USERS_ALL),
+                                                                help="Usuario de la app que informa el avance"),
+                "Duración (días)": st.column_config.NumberColumn("Duración (d)", min_value=0, step=1, default=5),
+                "Atraso (días)": st.column_config.NumberColumn("Atraso (d)", min_value=0, step=1, default=0),
+                "Inicio (opcional)": st.column_config.DateColumn("Inicio fijo", format="DD-MM-YYYY",
+                                                                 help="Vacío = se calcula por predecesoras"),
+                "Predecesoras": st.column_config.TextColumn("Predecesoras", help="Ej.: 2.1.1, 2.1.2CC+3"),
+                "Notas": st.column_config.TextColumn("Notas"),
+            })
+        g1, g2, _ = st.columns([1.3, 1.6, 3])
+        if g1.button("💾 Guardar programa", type="primary"):
+            new_tasks, errs, warns = planner.rows_to_tasks(grid, TASKS, set(USERS_ALL))
+            lost = [t["name"] for t in TASKS if t.get("real_start") and t["code"] not in {x["code"] for x in new_tasks}]
+            if lost:
+                errs.append("No puedes eliminar tareas con avance real registrado: " + ", ".join(lost[:3]))
+            if errs:
+                st.error("Revisa estos puntos antes de guardar:\n\n" + "\n".join(f"- {e}" for e in errs[:12]))
+            else:
+                def f(s, p):
+                    p.tasks = new_tasks
+                    if p.status == "draft":
+                        p.baseline, p.calendar = new_tasks, cal_new
+                mutate(f)
+                st.session_state.toast = ("Programa guardado. Pulsa «Guardar cambio…» para registrarlo." if EDIT else "Programa guardado.")
+                st.session_state.plan_warns = warns
+                st.rerun()
+        g2.download_button("📥 Descargar en Excel (plantilla)", planner.to_excel(TASKS or logic.template_tasks(), P.name, P.start),
+                           file_name=f"programa_{PID}.xlsx", help="El mismo formato sirve para importar")
+        for w in st.session_state.pop("plan_warns", []):
+            st.warning(w)
+
+        if DRAFT:
+            with st.expander("📤 Importar programa desde Excel (plantilla PlanificA+ o exportado de MS Project)"):
+                st.caption("Usa la plantilla (hoja «Programa», encabezados en la fila 2). Reemplaza el programa del borrador. "
+                           "La fecha «Inicio del proyecto» de la celda G1, si existe, actualiza el inicio.")
+                up = st.file_uploader("Archivo .xlsx", type=["xlsx"], key=f"up_{PID}")
+                if up is not None:
+                    try:
+                        idf, istart = planner.read_excel(up)
+                        new_tasks, errs, warns = planner.rows_to_tasks(idf, [], set(USERS_ALL))
+                    except Exception as e:  # archivo dañado o formato distinto
+                        new_tasks, errs, warns, istart = [], [f"No pude leer el archivo: {e}"], [], None
+                    if errs:
+                        st.error("El archivo tiene errores:\n\n" + "\n".join(f"- {e}" for e in errs[:15]))
+                    else:
+                        sch = logic.schedule(istart or P.start, new_tasks, cal_new)
+                        st.success(f"Archivo correcto: {len(new_tasks)} filas · término calculado {fmt(sch['end'])}"
+                                   + (f" · inicio {fmt(istart)}" if istart else ""))
+                        for w in warns[:8]:
+                            st.warning(w)
+                        st.dataframe(planner.tasks_to_rows(new_tasks).drop(columns=["_code"]).head(12), hide_index=True)
+                        if st.button("Importar y reemplazar el programa", type="primary"):
+                            def f(s, p):
+                                p.tasks = p.baseline = new_tasks
+                                p.calendar = cal_new
+                                if istart:
+                                    p.start = istart
+                            mutate(f)
+                            st.session_state.toast = f"Programa importado ({len(new_tasks)} filas)"
+                            st.rerun()
+
+    elif editable and MY_AREAS:
+        st.caption("La estructura del programa la arma el PMO o el administrador. Tú puedes ajustar duración y atraso de las tareas de tu área.")
+        own = [t for t in LEAVES if can(t["area"]) and t.get("kind") != "Hito"]
+        if not own:
+            st.info("No hay tareas de tu área.")
+        else:
+            c0 = st.selectbox("Tarea", [t["code"] for t in own], format_func=lambda c: f"{num[c]} · {next(t['name'] for t in TASKS if t['code'] == c)}")
+            t0 = next(t for t in TASKS if t["code"] == c0)
+            with st.form("stage"):
+                h1, h2 = st.columns(2)
+                dur = h1.number_input("Duración (días)", 0, 2000, int(t0["dur"]))
+                lag = h2.number_input("Atraso de inicio (días)", 0, 365, int(t0["lag"]))
+                go_ = st.form_submit_button("Guardar", type="primary")
+            if go_:
+                def f(s, p):
+                    ts = p.tasks
+                    cur = next(x for x in ts if x["code"] == c0)
+                    cur.update(dur=int(dur), lag=int(lag))
+                    p.tasks = ts
+                    if p.status == "draft":
+                        p.baseline = ts
+                mutate(f)
+                st.session_state.toast = "Listo. Guarda el cambio para registrarlo." if EDIT else "Tarea actualizada en el borrador."
+                st.rerun()
 
 # ---------------------------------------------------------------- Historial
 with T[3]:
@@ -615,7 +702,7 @@ with T[4]:
     k2.metric("Desviación promedio al cierre", f"{round(sum(d for _, d in meas) / len(meas)) if meas else 0:+d} d")
     k3.metric("Cambios aprobados", len(CHANGES), help=f"+{added} días agregados / −{rec} días recuperados en el término")
     cnt = {"verde": 0, "amarillo": 0, "rojo": 0}
-    for t in TASKS:
+    for t in LEAVES:
         if t.get("real_end") or (pct_plan[t["code"]] == 0 and pct_real[t["code"]] == 0):
             continue
         cnt[logic.semaforo(pct_plan[t["code"]] - pct_real[t["code"]])[0]] += 1

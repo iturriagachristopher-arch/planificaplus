@@ -57,6 +57,7 @@ class Project(Base):
     baseline_by = Column(String(120), default="")
     baseline_at = Column(Date)
     created_at = Column(DateTime, default=datetime.utcnow)
+    calendar = Column(String(10), default="corridos")  # corridos | habiles
 
     @property
     def tasks(self) -> list[dict]:
@@ -155,7 +156,7 @@ def next_code(s, model, project_id: int, prefix: str) -> str:
 
 def log_progress(s, p: Project, t: dict, kind: str, fecha: date, user: str, comment: str = "",
                  reg: date | None = None, pct: int | None = None, plan_pct: int | None = None):
-    base = logic.schedule(p.start, p.baseline)["at"]
+    base = logic.schedule(p.start, p.baseline, p.calendar or "corridos")["at"]
     in_base = any(b["code"] == t["code"] for b in p.baseline)
     base_date = None
     if kind != "avance" and in_base and t["code"] in base:
@@ -169,8 +170,8 @@ def log_progress(s, p: Project, t: dict, kind: str, fecha: date, user: str, comm
 
 def record_change(s, p: Project, before: list[dict], after: list[dict], user: str, cause: str, reason: str,
                   when: date | None = None) -> Change:
-    e0 = logic.schedule(p.start, before)["end"]
-    e1 = logic.schedule(p.start, after)["end"]
+    e0 = logic.schedule(p.start, before, p.calendar or "corridos")["end"]
+    e1 = logic.schedule(p.start, after, p.calendar or "corridos")["end"]
     p.version += 1
     ch = Change(project_id=p.id, code=next_code(s, Change, p.id, "CHG"), date=when or date.today(), user=user,
                 version=p.version, items_json=json.dumps(logic.diff_tasks(before, after), ensure_ascii=False),
@@ -258,6 +259,9 @@ def _migrate():
                 con.execute(text(f"ALTER TABLE users ADD COLUMN {name} {typ}"))
         # Usuarios anteriores a esta versión: se cuentan como creados ahora (no se desactivan de golpe).
         con.execute(text("UPDATE users SET created_at = :n WHERE created_at IS NULL"), {"n": datetime.utcnow()})
+        pcols = {c["name"] for c in inspect(ENGINE).get_columns("projects")}
+        if "calendar" not in pcols:
+            con.execute(text("ALTER TABLE projects ADD COLUMN calendar VARCHAR(10) DEFAULT 'corridos'"))
 
 
 FIRST_LOGIN_DAYS = 5      # días para el primer ingreso antes de desactivar la cuenta

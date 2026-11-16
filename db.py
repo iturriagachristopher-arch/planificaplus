@@ -22,6 +22,19 @@ class User(Base):
     role = Column(String(20), nullable=False)  # admin | ot | te | lectura
     pw_hash = Column(String(100), nullable=False)
     active = Column(Integer, default=1)
+    must_change = Column(Integer, default=0)  # 1 = clave temporal: debe cambiarla al entrar
+
+
+class PasswordRequest(Base):
+    """Solicitud de recuperación de contraseña; la resuelve el dueño de la app."""
+    __tablename__ = "password_requests"
+    id = Column(Integer, primary_key=True)
+    username = Column(String(50), nullable=False)
+    note = Column(Text, default="")
+    status = Column(String(12), default="pendiente")  # pendiente | resuelta | rechazada
+    created_at = Column(DateTime, default=datetime.utcnow)
+    resolved_by = Column(String(120), default="")
+    resolved_at = Column(DateTime)
 
 
 class Project(Base):
@@ -226,8 +239,25 @@ def seed_demo_project(s) -> Project:
     return p
 
 
+def _migrate():
+    """Agrega columnas nuevas a tablas ya existentes (create_all no modifica tablas)."""
+    from sqlalchemy import inspect, text
+    cols = {c["name"] for c in inspect(ENGINE).get_columns("users")}
+    if "must_change" not in cols:
+        with ENGINE.begin() as con:
+            con.execute(text("ALTER TABLE users ADD COLUMN must_change INTEGER DEFAULT 0"))
+
+
+def temp_password() -> str:
+    """Clave temporal legible: sin caracteres que se confundan (0/O, 1/l)."""
+    import secrets
+    alphabet = "ABCDEFGHJKMNPQRSTUVWXYZabcdefghjkmnpqrstuvwxyz23456789"
+    return "".join(secrets.choice(alphabet) for _ in range(10))
+
+
 def init_db(demo_password: str):
     Base.metadata.create_all(ENGINE)
+    _migrate()
     with Session() as s:
         if not s.scalar(select(func.count()).select_from(User)):
             for u, n, r in [("alberto", "Alberto Martino", "admin"), ("oficina", "Jefe de oficina técnica", "ot"),

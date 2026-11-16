@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import io
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 
 import pandas as pd
 import plotly.graph_objects as go
@@ -10,6 +10,7 @@ import streamlit as st
 from sqlalchemy import select
 
 import db
+import ia
 import logic
 from logic import AREAS, ROLES, CAUSES, TOL_OK, TOL_HIGH
 
@@ -27,6 +28,10 @@ try:
     DEMO_PW = st.secrets["DEMO_PASSWORD"]
 except Exception:
     DEMO_PW = "planifica2026"
+try:
+    OWNER = str(st.secrets["APP_OWNER"]).strip().lower()
+except Exception:
+    OWNER = "christopher"  # dueño de la app: el único que resuelve recuperaciones de clave
 
 
 @st.cache_resource
@@ -55,7 +60,53 @@ def login_view():
                 st.session_state.uid = user.id
                 st.rerun()
             st.error("Usuario o contraseña incorrectos.")
+        with st.expander("¿Olvidaste tu contraseña?"):
+            st.caption("Tu solicitud llega al administrador de la app. Él te entregará una clave temporal "
+                       "por un canal directo (WhatsApp o correo) y al entrar deberás crear una nueva.")
+            with st.form("forgot", clear_on_submit=True):
+                fu = st.text_input("Tu usuario")
+                fn = st.text_input("¿Cómo te contactamos? (opcional)", placeholder="Ej: WhatsApp o correo")
+                sent = st.form_submit_button("Enviar solicitud")
+            if sent:
+                name = fu.strip().lower()
+                if not name:
+                    st.error("Escribe tu usuario.")
+                else:
+                    with db.Session() as s:
+                        exists = s.scalar(select(db.User).where(db.User.username == name, db.User.active == 1))
+                        pending = s.scalar(select(db.PasswordRequest).where(db.PasswordRequest.username == name,
+                                                                           db.PasswordRequest.status == "pendiente"))
+                        if exists and not pending:
+                            s.add(db.PasswordRequest(username=name, note=fn.strip()[:200]))
+                            s.commit()
+                    # Mismo mensaje exista o no el usuario, para no revelar qué usuarios hay.
+                    st.success("Solicitud enviada. El administrador te contactará con una clave temporal.")
         st.caption("Prototipo A+S · AIEP Santiago Norte · Leslie Vera, Christopher Iturriaga, Andrés Molina")
+
+
+def pw_form(key: str, need_current: bool, user) -> None:
+    """Formulario para que el usuario defina su propia contraseña."""
+    with st.form(key, clear_on_submit=True):
+        cur = st.text_input("Contraseña actual (la temporal)" if not need_current else "Contraseña actual", type="password")
+        n1 = st.text_input("Nueva contraseña (mínimo 8 caracteres)", type="password")
+        n2 = st.text_input("Repite la nueva contraseña", type="password")
+        go = st.form_submit_button("Guardar contraseña", type="primary")
+    if go:
+        if not db.check_pw(cur, user.pw_hash):
+            st.error("La contraseña actual no es correcta.")
+        elif len(n1) < 8:
+            st.error("La nueva contraseña debe tener al menos 8 caracteres.")
+        elif n1 != n2:
+            st.error("Las contraseñas nuevas no coinciden.")
+        elif n1 == cur:
+            st.error("La nueva contraseña debe ser distinta de la actual.")
+        else:
+            with db.Session() as s:
+                u_ = s.get(db.User, user.id)
+                u_.pw_hash, u_.must_change = db.hash_pw(n1), 0
+                s.commit()
+            st.session_state.toast = "Contraseña actualizada"
+            st.rerun()
 
 
 if "uid" not in st.session_state:
@@ -64,12 +115,25 @@ if "uid" not in st.session_state:
 
 with db.Session() as s:
     USER = s.get(db.User, st.session_state.uid)
-if USER is None:
+if USER is None or not USER.active:
     st.session_state.clear()
     st.rerun()
 ROLE_NAME, MY_AREAS = ROLES[USER.role]
 IS_ADMIN = USER.role == "admin"
+IS_OWNER = IS_ADMIN and USER.username == OWNER
 can = lambda area: area in MY_AREAS
+
+if USER.must_change:
+    _, mid, _ = st.columns([1, 1.2, 1])
+    with mid:
+        st.markdown('<div class="brand">Planific<b>A+</b></div>', unsafe_allow_html=True)
+        st.subheader(f"Hola, {USER.name}")
+        st.info("Estás usando una contraseña temporal. Crea una propia para continuar.")
+        pw_form("first_pw", False, USER)
+        if st.button("Cerrar sesión"):
+            st.session_state.clear()
+            st.rerun()
+    st.stop()
 
 # ---------------------------------------------------------------- barra lateral
 with db.Session() as s:
@@ -88,6 +152,13 @@ with st.sidebar:
                            format_func=lambda i: next(p.name for p in projects if p.id == i))
         st.session_state.pid = PID
     CORTE = st.date_input("Fecha de corte", value=date.today(), help="Fecha usada para calcular el avance plan. Por defecto, hoy.")
+    if IS_OWNER:
+        with db.Session() as s:
+            n_req = len(s.scalars(select(db.PasswordRequest).where(db.PasswordRequest.status == "pendiente")).all())
+        if n_req:
+            st.warning(f"🔑 {n_req} solicitud(es) de recuperación de contraseña. Revísalas en Administración.")
+    with st.expander("Cambiar mi contraseña"):
+        pw_form("my_pw", True, USER)
     if st.button("Cerrar sesión", width="stretch"):
         st.session_state.clear()
         st.rerun()
@@ -137,8 +208,8 @@ p_plan, p_real = logic.weighted(TASKS, pct_plan), logic.weighted(TASKS, pct_real
 p_orig = logic.weighted(BASEL, {t["code"]: logic.pct_at(BAS["at"].get(t["code"]), t["dur"], CORTE) for t in BASEL})
 lvl, lbl = logic.semaforo(p_plan - p_real)
 c1, c2, c3, c4, c5 = st.columns(5)
-c1.metric("Fin línea base", "—" if DRAFT else fmt(BAS["end"]))
-c2.metric("Fin actual", fmt(CUR["end"]), None if DRAFT else f"{dev_end:+d} días", delta_color="inverse")
+c1.metric("Fin línea base", "—" if DRAFT else BAS["end"].strftime("%d-%m-%y"))
+c2.metric("Fin actual", CUR["end"].strftime("%d-%m-%y"), None if DRAFT else f"{dev_end:+d} días", delta_color="inverse")
 c3.metric("Avance plan", f"{p_plan}%")
 c4.metric("Avance real", f"{p_real}%")
 c5.metric("Desviación (real − plan)", f"{p_real - p_plan:+d} pp")
@@ -254,7 +325,7 @@ def row(t, i):
 
 DF = pd.DataFrame([row(t, i) for i, t in enumerate(TASKS)])
 
-tabs = ["📊 Carta Gantt", "✅ Avance real", "🛠️ Etapas", "🧾 Historial", "📈 KPI"] + (["⚙️ Administración"] if IS_ADMIN else [])
+tabs = ["📊 Carta Gantt", "✅ Avance real", "🛠️ Etapas", "🧾 Historial", "📈 KPI", "🤖 Asistente IA"] + (["⚙️ Administración"] if IS_ADMIN else [])
 T = st.tabs(tabs)
 
 # ---------------------------------------------------------------- Gantt
@@ -510,14 +581,128 @@ with T[4]:
             ar[a] += 1
     st.plotly_chart(hbar("Cambios por área", [AREAS[a] for a in ar], list(ar.values()), ["#3E5A86"] * 3), width="stretch")
 
+# ---------------------------------------------------------------- Asistente IA
+def project_context() -> str:
+    lines = [f"Proyecto: {P.name}", f"Estado: {pill[0]} · versión v{P.version} · inicio {fmt(P.start)}",
+             f"Fecha de corte: {fmt(CORTE)}",
+             f"Término línea base: {'sin línea base' if DRAFT else fmt(BAS['end'])} · término actual: {fmt(CUR['end'])} · desviación: {dev_end:+d} días",
+             f"Avance plan {p_plan}% · avance real {p_real}% · desviación {p_real - p_plan:+d} pp · semáforo {lbl}",
+             "", "ETAPAS (tabla CSV):", DF.drop(columns=["Depende de"]).to_csv(index=False)]
+    if CHANGES:
+        lines += ["", "CAMBIOS APROBADOS:"] + [f"{c.code} | {fmt(c.date)} | {c.user} | v{c.version} | impacto {c.impact:+d} d | {c.cause} | {c.reason} | "
+                                               + "; ".join(logic.change_text(i) for i in c.items) for c in CHANGES[-30:]]
+    if LOGS:
+        lines += ["", "REGISTRO DE AVANCE (últimos 40):"] + [f"{l.code} | {fmt(l.fecha)} | {l.user} | {l.task_name} | {l.kind}"
+                                                              + (f" {l.pct}% (plan {l.plan_pct}%)" if l.kind == "avance" else "")
+                                                              + ("" if l.dev_days is None else f" | desv {l.dev_days:+d} d") + (f" | {l.comment}" if l.comment else "")
+                                                              for l in LOGS[-40:]]
+    return "\n".join(lines)
+
+
+with T[5]:
+    try:
+        prov = ia.provider(st.secrets)
+    except Exception:
+        prov = None
+    st.caption("El asistente responde solo sobre este proyecto y el uso de PlanificA+. Revisa siempre sus respuestas antes de enviarlas.")
+    if prov is None:
+        st.info("El asistente no está activado. El dueño de la app debe agregar `GEMINI_API_KEY` (o `ANTHROPIC_API_KEY`) en los Secrets de Streamlit.")
+    else:
+        hist_key = f"chat_{PID}"
+        st.session_state.setdefault(hist_key, [])
+        st.session_state.setdefault("ia_count", 0)
+        quick = {"📋 Resumen del estado": "Resume el estado del proyecto a la fecha de corte: avance plan vs real, semáforo, desviación del término y las 3 etapas que más preocupan.",
+                 "🚨 Etapas en riesgo": "¿Qué etapas abiertas están en amarillo o rojo, o pueden atrasar el término? Indica para cada una la desviación y una acción sugerida.",
+                 "📝 Reporte semanal": "Redacta el reporte semanal para la ITO y el mandante: resumen, avance, etapas en riesgo, cambios recientes y próximos pasos. Máximo 300 palabras."}
+        qc = st.columns(len(quick) + 1)
+        pick = None
+        for i, (lbl_, q_) in enumerate(quick.items()):
+            if qc[i].button(lbl_, width="stretch"):
+                pick = q_
+        if qc[-1].button("🗑️ Limpiar chat", width="stretch"):
+            st.session_state[hist_key] = []
+            st.rerun()
+        with st.expander("📄 Extraer hitos y multas desde las bases"):
+            bases = st.text_area("Pega aquí el texto de las bases (solo el capítulo de plazos y multas)", height=160)
+            if st.button("Extraer hitos"):
+                if len(bases.strip()) < 40:
+                    st.error("Pega un texto más largo de las bases.")
+                else:
+                    pick = ("Del siguiente texto de bases extrae TODAS las obligaciones con plazo, hito o multa en una tabla: "
+                            "Punto | Obligación | Plazo | Multa | Responsable sugerido. No inventes datos.\n\nBASES:\n" + bases[:ia.MAX_Q * 4])
+        for m in st.session_state[hist_key]:
+            with st.chat_message(m["role"]):
+                st.markdown(m["content"] if m["role"] == "assistant" or len(m["content"]) < 600 else m["content"][:600] + "…")
+        typed = st.chat_input("Pregunta sobre el proyecto o pide un texto de trabajo")
+        q = pick or typed
+        if q:
+            if st.session_state.ia_count >= 30:
+                st.warning("Llegaste al máximo de 30 consultas por sesión. Cierra sesión y vuelve a entrar para continuar.")
+            else:
+                st.session_state.ia_count += 1
+                with st.chat_message("user"):
+                    st.markdown(q if len(q) < 600 else q[:600] + "…")
+                with st.chat_message("assistant"):
+                    with st.spinner("Pensando…"):
+                        try:
+                            ans = ia.ask(prov, project_context(), st.session_state[hist_key], q)
+                        except Exception as e:
+                            ans = f"⚠️ {e}" if isinstance(e, RuntimeError) else "⚠️ No se pudo conectar con el asistente. Intenta de nuevo."
+                    st.markdown(ans)
+                if not ans.startswith("⚠️"):
+                    st.session_state[hist_key] += [{"role": "user", "content": q}, {"role": "assistant", "content": ans}]
+
 # ---------------------------------------------------------------- Administración
 if IS_ADMIN:
-    with T[5]:
+    with T[6]:
         st.subheader("Usuarios")
         with db.Session() as s:
             users = s.scalars(select(db.User).order_by(db.User.id)).all()
-        st.dataframe(pd.DataFrame([{"Usuario": u.username, "Nombre": u.name, "Perfil": ROLES[u.role][0],
-                                    "Activo": "Sí" if u.active else "No"} for u in users]), hide_index=True, width="stretch")
+        st.dataframe(pd.DataFrame([{"Usuario": u.username, "Nombre": u.name, "Perfil": ROLES[u.role][0] + (" · dueño" if u.username == OWNER else ""),
+                                    "Activo": "Sí" if u.active else "No",
+                                    "Clave": "Temporal (debe cambiarla)" if u.must_change else "Propia"} for u in users]),
+                     hide_index=True, width="stretch")
+        st.caption("Las claves que asigna el administrador son temporales: el usuario debe crear una propia al entrar.")
+
+        if IS_OWNER:
+            st.markdown("**🔑 Solicitudes de recuperación de contraseña**")
+            with db.Session() as s:
+                reqs = s.scalars(select(db.PasswordRequest).order_by(db.PasswordRequest.id.desc())).all()
+            pend = [r for r in reqs if r.status == "pendiente"]
+            if "new_temp" in st.session_state:
+                who_, tmp_ = st.session_state.new_temp
+                st.success(f"Clave temporal para **{who_}**: `{tmp_}` — entrégasela por un canal directo. "
+                           "No se volverá a mostrar; al entrar deberá crear una propia.")
+                if st.button("Ya la entregué, ocultar"):
+                    del st.session_state.new_temp
+                    st.rerun()
+            if not pend:
+                st.caption("No hay solicitudes pendientes.")
+            for r in pend:
+                c1_, c2_, c3_ = st.columns([3, 1.3, 1])
+                c1_.write(f"**{r.username}** · {r.created_at:%d-%m-%Y %H:%M} UTC" + (f" · contacto: {r.note}" if r.note else ""))
+                if c2_.button("Generar clave temporal", key=f"ok{r.id}", type="primary"):
+                    tmp = db.temp_password()
+                    with db.Session() as s:
+                        u_ = s.scalar(select(db.User).where(db.User.username == r.username))
+                        rr = s.get(db.PasswordRequest, r.id)
+                        if u_:
+                            u_.pw_hash, u_.must_change = db.hash_pw(tmp), 1
+                        rr.status, rr.resolved_by, rr.resolved_at = "resuelta", USER.name, datetime.utcnow()
+                        s.commit()
+                    st.session_state.new_temp = (r.username, tmp)
+                    st.rerun()
+                if c3_.button("Rechazar", key=f"no{r.id}"):
+                    with db.Session() as s:
+                        rr = s.get(db.PasswordRequest, r.id)
+                        rr.status, rr.resolved_by, rr.resolved_at = "rechazada", USER.name, datetime.utcnow()
+                        s.commit()
+                    st.rerun()
+            done = [r for r in reqs if r.status != "pendiente"][:10]
+            if done:
+                with st.expander("Historial de solicitudes"):
+                    st.dataframe(pd.DataFrame([{"Usuario": r.username, "Solicitada (UTC)": r.created_at, "Estado": r.status,
+                                                "Resuelta por": r.resolved_by} for r in done]), hide_index=True, width="stretch")
         u1, u2 = st.columns(2)
         with u1.form("newuser", clear_on_submit=True):
             st.markdown("**Crear usuario**")
@@ -534,7 +719,7 @@ if IS_ADMIN:
                         if s.scalar(select(db.User).where(db.User.username == uname)):
                             st.error("Ese usuario ya existe.")
                         else:
-                            s.add(db.User(username=uname, name=nn.strip(), role=nr, pw_hash=db.hash_pw(npw)))
+                            s.add(db.User(username=uname, name=nn.strip(), role=nr, pw_hash=db.hash_pw(npw), must_change=1))
                             s.commit()
                             st.session_state.toast = "Usuario creado"
                             st.rerun()
@@ -548,11 +733,14 @@ if IS_ADMIN:
                     st.error("La contraseña debe tener al menos 8 caracteres.")
                 elif who == USER.username and not act:
                     st.error("No puedes desactivar tu propio usuario.")
+                elif who == OWNER and not IS_OWNER:
+                    st.error("Solo el dueño de la app puede modificar su propio usuario.")
                 else:
                     with db.Session() as s:
                         u = s.scalar(select(db.User).where(db.User.username == who))
                         if pw2:
                             u.pw_hash = db.hash_pw(pw2)
+                            u.must_change = 0 if who == USER.username else 1
                         u.active = 1 if act else 0
                         s.commit()
                     st.session_state.toast = "Usuario actualizado"

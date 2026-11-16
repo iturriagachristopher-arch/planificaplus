@@ -8,6 +8,8 @@ Aplicación web para controlar el programa de una obra de subestación eléctric
 - **Avance plan vs real**: el plan se calcula solo con las fechas de la Gantt; el real lo informa cada área en %. Semáforo: 🟢 hasta 5 pp de atraso · 🟡 de 6 a 10 · 🔴 desde 11. Al llegar a 100 % la etapa se cierra con fecha real (`AV-0001`).
 - **KPI**: desviación del término, % de etapas cerradas en plazo, desviación promedio al cierre, días por causa, evolución de la fecha de término y cambios por área.
 - **Exportación a Excel** del programa, los cambios y el registro de avance.
+- **Asistente IA** (Gemini o Claude) que responde solo sobre el proyecto: resumen, etapas en riesgo, reporte semanal y extracción de hitos desde las bases.
+- **Seguridad de claves**: las claves que asigna el administrador son temporales (el usuario crea la suya al entrar), cada usuario puede cambiar su clave y la recuperación de contraseña pasa por el dueño de la app (`APP_OWNER`).
 
 Proyecto A+S · AIEP Santiago Norte · Ingeniería Industrial · INU603 — Leslie Vera, Christopher Iturriaga, Andrés Molina.
 
@@ -67,6 +69,8 @@ Streamlit Cloud **borra los archivos locales** cada vez que la app se reinicia, 
    ```toml
    DATABASE_URL = "postgresql://postgres.xxxx:TU_CLAVE@aws-0-sa-east-1.pooler.supabase.com:5432/postgres"
    DEMO_PASSWORD = "una-clave-segura"
+   APP_OWNER = "christopher"          # dueño: resuelve recuperaciones de clave
+   GEMINI_API_KEY = "tu-api-key"       # opcional: activa el Asistente IA (aistudio.google.com)
    ```
 
 4. **Deploy**. En 2–3 minutos tendrás una URL tipo `https://planificaplus.streamlit.app` para compartir.

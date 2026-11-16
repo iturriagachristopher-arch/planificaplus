@@ -743,7 +743,9 @@ with T[4]:
         fv = go.Figure(go.Scatter(x=[p_[0] for p_ in pts], y=[p_[1] for p_ in pts], mode="lines+markers", line=dict(color=ACCENT, width=3)))
         fv.add_hline(y=BAS["end"], line_dash="dot", line_color=BASE)
         fv.update_layout(title="Fecha de término por versión", height=300, margin=dict(l=10, r=10, t=50, b=10), plot_bgcolor="white",
-                         yaxis=dict(gridcolor="#E4E8E5"))
+                         yaxis=dict(gridcolor="#E4E8E5", type="date", tickformat="%d-%m-%y",
+                                    range=[(min(p_[1] for p_ in pts) - timedelta(days=3)).isoformat(),
+                                           (max(p_[1] for p_ in pts) + timedelta(days=3)).isoformat()]))
         g2.plotly_chart(fv, width="stretch")
     if meas:
         meas.sort(key=lambda x: -x[1])

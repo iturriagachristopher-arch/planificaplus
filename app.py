@@ -15,7 +15,7 @@ import mailer
 import logic
 from logic import AREAS, ROLES, CAUSES, TOL_OK, TOL_HIGH
 
-st.set_page_config(page_title="PlanificA+ · Control de obra", page_icon="📐", layout="wide")
+st.set_page_config(page_title="PlanificA+ · Control de obra", page_icon="icon.png" if __import__("os").path.exists("icon.png") else "📐", layout="wide")
 
 ACCENT, WARN, OK, BAD, BASE, INK = "#0E5E52", "#C98A12", "#2F7A3A", "#AE2A21", "#A9B3AE", "#17201D"
 st.markdown("""<style>
@@ -24,6 +24,15 @@ st.markdown("""<style>
 .p-draft{background:#E2E9F4;color:#3E5A86}.p-live{background:#E3F1E4;color:#2F7A3A}.p-edit{background:#FBEFD6;color:#9A6408}
 .brand{font-size:2rem;font-weight:700;letter-spacing:.01em}.brand b{color:#0E5E52}
 </style>""", unsafe_allow_html=True)
+
+
+def brand(width: int = 260):
+    """Logo de PlanificA+ (logo.webp); si no está, el nombre en texto."""
+    import os
+    if os.path.exists("logo.webp"):
+        st.image("logo.webp", width=width)
+    else:
+        st.markdown('<div class="brand">Planific<b>A+</b></div>', unsafe_allow_html=True)
 
 try:
     DEMO_PW = st.secrets["DEMO_PASSWORD"]
@@ -59,7 +68,7 @@ _init()
 def login_view():
     _, mid, _ = st.columns([1, 1.2, 1])
     with mid:
-        st.markdown('<div class="brand">Planific<b>A+</b></div>', unsafe_allow_html=True)
+        brand(280)
         st.caption("Control de obra · Línea base, avance real y control de cambios")
         with st.form("login"):
             u = st.text_input("Usuario")
@@ -187,7 +196,7 @@ can = lambda area: area in MY_AREAS
 if USER.must_change:
     _, mid, _ = st.columns([1, 1.2, 1])
     with mid:
-        st.markdown('<div class="brand">Planific<b>A+</b></div>', unsafe_allow_html=True)
+        brand(280)
         st.subheader(f"Hola, {USER.name}")
         st.info("Estás usando una contraseña temporal. Crea una propia para continuar.")
         pw_form("first_pw", False, USER)
@@ -200,7 +209,7 @@ if USER.must_change:
 with db.Session() as s:
     projects = s.scalars(select(db.Project).order_by(db.Project.id)).all()
 with st.sidebar:
-    st.markdown('<div class="brand">Planific<b>A+</b></div>', unsafe_allow_html=True)
+    brand(170)
     st.write(f"**{USER.name}**  \n{ROLE_NAME}")
     st.caption("Edita: " + (", ".join(AREAS[a] for a in MY_AREAS) or "nada (solo lectura)"))
     if not projects:

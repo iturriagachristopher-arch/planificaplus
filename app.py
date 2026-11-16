@@ -1047,7 +1047,7 @@ if IS_ADMIN:
         if IS_OWNER:
             with st.expander("🗑️ Eliminar proyecto (solo el dueño)"):
                 st.warning("Borra el proyecto **y todo su historial** (cambios y avances). No se puede deshacer.")
-                conf = st.text_input("Escribe ELIMINAR para confirmar", key="del_conf")
+                conf = st.text_input("Escribe ELIMINAR para confirmar", key=f"del_conf_{PID}")
                 if st.button("Eliminar definitivamente", type="primary", disabled=conf.strip().upper() != "ELIMINAR"):
                     with db.Session() as s:
                         for m in (db.Change, db.Progress):

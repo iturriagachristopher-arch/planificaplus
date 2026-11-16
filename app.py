@@ -29,12 +29,15 @@ st.markdown("""<style>
 
 
 def brand(width: int = 260):
-    """Logo de PlanificA+ (logo.webp); si no está, el nombre en texto."""
+    """Logo de PlanificA+ centrado (logo.webp); si no está, el nombre en texto."""
+    import base64
     import os
     if os.path.exists("logo.webp"):
-        st.image("logo.webp", width=width)
+        b64 = base64.b64encode(open("logo.webp", "rb").read()).decode()
+        st.markdown(f'<div style="text-align:center"><img src="data:image/webp;base64,{b64}" width="{width}" '
+                    f'alt="PlanificA+"></div>', unsafe_allow_html=True)
     else:
-        st.markdown('<div class="brand">Planific<b>A+</b></div>', unsafe_allow_html=True)
+        st.markdown('<div class="brand" style="text-align:center">Planific<b>A+</b></div>', unsafe_allow_html=True)
 
 try:
     DEMO_PW = st.secrets["DEMO_PASSWORD"]
@@ -71,7 +74,7 @@ def login_view():
     _, mid, _ = st.columns([1, 1.2, 1])
     with mid:
         brand(280)
-        st.caption("Control de obra · Línea base, avance real y control de cambios")
+        st.markdown('<p style="text-align:center;color:#6B7280;font-size:.9rem">Control de obra · Línea base, avance real y control de cambios</p>', unsafe_allow_html=True)
         with st.form("login"):
             u = st.text_input("Usuario")
             pw = st.text_input("Contraseña", type="password")
@@ -124,7 +127,7 @@ def login_view():
                             s.commit()
                     # Mismo mensaje exista o no el usuario, para no revelar qué usuarios hay.
                     st.success("Solicitud enviada. El administrador te contactará con una clave temporal.")
-        st.caption("Prototipo A+S · AIEP Santiago Norte · Leslie Vera, Christopher Iturriaga, Andrés Molina")
+        st.markdown('<p style="text-align:center;color:#6B7280;font-size:.8rem">Prototipo A+S · AIEP Santiago Norte · Leslie Vera, Christopher Iturriaga, Andrés Molina</p>', unsafe_allow_html=True)
 
 
 def make_username(full_name: str) -> str:

@@ -61,8 +61,12 @@ def ask(prov: tuple[str, str, str], context: str, history: list[dict], question:
                 "generationConfig": {"temperature": 0.2, "maxOutputTokens": 8192}}
         last = None
         for m in models:
-            r = requests.post(f"https://generativelanguage.googleapis.com/v1beta/models/{m}:generateContent",
-                              headers={"x-goog-api-key": key, "Content-Type": "application/json"}, json=body, timeout=90)
+            try:
+                r = requests.post(f"https://generativelanguage.googleapis.com/v1beta/models/{m}:generateContent",
+                                  headers={"x-goog-api-key": key, "Content-Type": "application/json"}, json=body, timeout=60)
+            except requests.RequestException:   # tiempo agotado o red: probar el siguiente modelo
+                last = "timeout"
+                continue
             last = r.status_code
             if r.status_code in (404, 500, 503, 429):
                 continue

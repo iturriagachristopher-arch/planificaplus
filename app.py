@@ -425,7 +425,9 @@ def row(t, i):
             "Avance plan %": plan, "Avance real %": real, "Desv. (pp)": real - plan, "Semáforo": sem, "Nota": note}
 
 
-DF = pd.DataFrame([row(t, i) for i, t in enumerate(TASKS)])
+DF_COLS = ["#", "Etapa", "Tipo", "Área", "Responsable", "Depende de", "Duración (d)", "Atraso (d)", "Inicio", "Fin",
+           "Holgura (d)", "Crítica", "vs base (d)", "Avance plan %", "Avance real %", "Desv. (pp)", "Semáforo", "Nota"]
+DF = pd.DataFrame([row(t, i) for i, t in enumerate(TASKS)], columns=DF_COLS)
 
 tabs = ["📊 Carta Gantt", "✅ Avance real", "🧩 Programa", "🧾 Historial", "📈 KPI", "🤖 Asistente IA"] + (["⚙️ Administración"] if IS_ADMIN else [])
 T = st.tabs(tabs)

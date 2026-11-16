@@ -12,6 +12,7 @@ import requests
 OFF_TOPIC = "Esa consulta no aplica para PlanificA+. Solo puedo ayudarte con el proyecto, su programa, avance, cambios, hitos y el uso de la aplicación."
 MAX_Q = 2000      # caracteres por pregunta
 MAX_CTX = 30000   # caracteres de contexto del proyecto
+GEMINI_FALLBACKS = ["gemini-3.5-flash-lite", "gemini-3.6-flash", "gemini-3.1-flash-lite", "gemini-2.5-flash"]
 
 SYSTEM = f"""Eres el asistente de PlanificA+, una aplicación de control de obra para proyectos de ampliación de subestaciones eléctricas en Chile (contratos EPC).
 
@@ -41,7 +42,7 @@ def provider(secrets) -> tuple[str, str, str] | None:
     g, c = get("GEMINI_API_KEY"), get("ANTHROPIC_API_KEY")
     pref = get("AI_PROVIDER").lower()
     if g and (pref != "claude" or not c):
-        return ("gemini", g, get("GEMINI_MODEL", "gemini-2.5-flash"))
+        return ("gemini", g, get("GEMINI_MODEL", "gemini-3.8-flash"))
     if c:
         return ("claude", c, get("CLAUDE_MODEL", "claude-haiku-5-5"))
     return None
@@ -53,22 +54,30 @@ def ask(prov: tuple[str, str, str], context: str, history: list[dict], question:
     system = SYSTEM + "\n\nDATOS DEL PROYECTO (solo lectura):\n" + context[:MAX_CTX]
     turns = history[-6:] + [{"role": "user", "content": question[:MAX_Q]}]
     if name == "gemini":
-        r = requests.post(
-            f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent",
-            headers={"x-goog-api-key": key, "Content-Type": "application/json"},
-            json={"system_instruction": {"parts": [{"text": system}]},
-                  "contents": [{"role": "model" if t["role"] == "assistant" else "user", "parts": [{"text": t["content"]}]} for t in turns],
-                  "generationConfig": {"temperature": 0.2, "maxOutputTokens": 1500}},
-            timeout=60)
-        if r.status_code == 429:
+        # Si el modelo está saturado (503/500) o no existe (404), se prueba con otros modelos gratuitos.
+        models = [model] + [m for m in GEMINI_FALLBACKS if m != model]
+        body = {"system_instruction": {"parts": [{"text": system}]},
+                "contents": [{"role": "model" if t["role"] == "assistant" else "user", "parts": [{"text": t["content"]}]} for t in turns],
+                "generationConfig": {"temperature": 0.2, "maxOutputTokens": 1500}}
+        last = None
+        for m in models:
+            r = requests.post(f"https://generativelanguage.googleapis.com/v1beta/models/{m}:generateContent",
+                              headers={"x-goog-api-key": key, "Content-Type": "application/json"}, json=body, timeout=60)
+            last = r.status_code
+            if r.status_code in (404, 500, 503, 429):
+                continue
+            if r.status_code in (400, 401, 403):
+                raise RuntimeError("Gemini rechazó la clave. Revisa GEMINI_API_KEY en los Secrets de Streamlit.")
+            if r.status_code >= 400:
+                continue
+            data = r.json()
+            try:
+                return "".join(p.get("text", "") for p in data["candidates"][0]["content"]["parts"]).strip() or OFF_TOPIC
+            except (KeyError, IndexError):
+                return OFF_TOPIC
+        if last == 429:
             raise RuntimeError("Se alcanzó el límite gratuito de Gemini. Intenta en unos minutos.")
-        if r.status_code >= 400:
-            raise RuntimeError(f"Gemini respondió con error {r.status_code}. Revisa la clave y el modelo en Secrets.")
-        data = r.json()
-        try:
-            return "".join(p.get("text", "") for p in data["candidates"][0]["content"]["parts"]).strip() or OFF_TOPIC
-        except (KeyError, IndexError):
-            return OFF_TOPIC
+        raise RuntimeError("Los modelos de Gemini están saturados en este momento. Intenta de nuevo en un par de minutos.")
     r = requests.post(
         "https://api.anthropic.com/v1/messages",
         headers={"x-api-key": key, "anthropic-version": "2023-06-01", "content-type": "application/json"},
